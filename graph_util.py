@@ -6,8 +6,11 @@ import os
 import pickle
 import scipy.spatial as SS
 import random
-from torch_geometric.data import Data, DataLoader, InMemoryDataset
+from torch_geometric.data import Data, DataLoader, InMemoryDataset, Dataset
 from torch_geometric.utils import scatter, degree
+import h5py
+import time
+
 
 seed = 999
 random.seed(seed)
@@ -108,6 +111,7 @@ def build_PyGdata_velocity(data_path, graph_path, r_link, p=1):
         PyGdataset.append(graph)
     return PyGdataset
 
+
 def split_dataloader(dataset, batch_size=2000, shuffle=True):
     split_train = int(len(dataset) * 0.8)
     split_valid = int(len(dataset) * 0.9)
@@ -122,6 +126,76 @@ def split_dataloader(dataset, batch_size=2000, shuffle=True):
 
     return train_loader, valid_loader, test_loader
 
+
+def build_PyGdata_fromH5(h5_path, predict_velocity=False, data_name='BSQ',
+                 edge_flag=False, r_link=50.,
+                 L=1000, leafsize=16, epsilon=0.00001):
+    ''' 
+    Load the h5 file where groups (i.e. point clouds) contain (halo) point features (e.g., position, mass), 
+    if predict_velocity == False:
+    - predict the cloud labels (i.e. cosmological parameters)
+    otherwise:
+    - predict the point velocity
+    '''
+    data_list = []
+    count = 0
+    start = time.time()
+    with h5py.File(h5_path, 'r') as f:
+        group = f[data_name]
+        labels = f["params"]
+        for graph_name in group:
+            # start = time.time()
+            g = group[graph_name] #of the form '/BSQ/BSQ_0'
+            idx = int(g.name.split('_')[-1])
+            
+            # Extract input node features
+            Mvir = torch.tensor(g['Mvir'][:], dtype=torch.float).view(-1, 1)
+            concentration = torch.tensor(g['c_klypin'][:], dtype=torch.float).view(-1,1)
+            X = torch.tensor(g['X'][:], dtype=torch.float).view(-1, 1)
+            Y = torch.tensor(g['Y'][:], dtype=torch.float).view(-1, 1)
+            Z = torch.tensor(g['Z'][:], dtype=torch.float).view(-1, 1)         
+            feat = torch.cat([Mvir, concentration, X, Y, Z], dim=1)
+
+            # Construct labels
+            if predict_velocity: #point-wise labels
+                VX = torch.tensor(g['VX'][:], dtype=torch.float).view(-1, 1)
+                VY = torch.tensor(g['VY'][:], dtype=torch.float).view(-1, 1)
+                VZ = torch.tensor(g['VZ'][:], dtype=torch.float).view(-1, 1)
+                y = torch.cat([VX, VY, VZ], dim=1)
+            else:
+            # Read the cloud-level labels: cosmological parameters:
+                # TODO -- fix the names across different h5 files
+                if data_name == 'BSQ':
+                    Omega_m = labels['Omega_m'][idx]
+                    sigma_8 = labels['sigma_8'][idx]
+                    Omega_b = labels['Omega_b'][idx]
+                    h = labels['h'][idx]
+                    n_s = labels['n_s'][idx]
+                    y = torch.tensor([Omega_m, sigma_8, Omega_b, h, n_s], dtype=torch.float).view(-1,1)
+                else:
+                    y = torch.tensor(labels['sigma8'][idx], dtype=float).view(-1,1)
+
+            # create edges based on position
+            if edge_flag:
+                edge_index, edge_dist = build_graph(torch.cat([X,Y,Z], dim=1), 
+                                                    r_link=r_link, 
+                                                    L=L, leafsize=leafsize, 
+                                                    epsilon=epsilon)
+            else:
+                edge_index, edge_dist = None, None
+
+            # Create graph
+            data = Data(x=feat, y=y, edge_index=edge_index, edge_attr=edge_dist)
+            data_list.append(data)
+            count += 1
+            # time
+            end = time.time()
+            duration = end - start
+            if count % 100 == 0:
+                print(f"processed {count} number of clouds! used {duration:.4f}")
+
+    return data_list
+
     
 
 if __name__ == '__main__':
@@ -132,11 +206,17 @@ if __name__ == '__main__':
     #                     default='datasets/position_only/graph_m=2000_n=5000.pkl', help='graph dataset file')
     parser.add_argument('--r_link', type=float, default=90, help='knn graph distance cut-off threshold')
     parser.add_argument('--neutrinos', action='store_true', help='use neutrino dataset')
+    parser.add_argument('--h5_path', default='/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5',
+                         help='h5 path to load the data')
+    parser.add_argument('--data_name', default='BSQ',
+                         help='data group name in the h5 file') #TODO: sync across BSQ and LH? 
+
     #the same script applies to position_only and position_velocity point clouds, 
     # as we only use position features to construct the graph
 
     args = parser.parse_args()
+    dataset = build_PyGdata_fromH5(args.h5_path, data_name=args.data_name)
 
-    dataset = build_graphset(args)
+    #dataset = build_graphset(args)
     #train_loader, valid_loader, test_loader = split_dataloader(dataset)
     #print(f"train={len(train_loader)}, valid={len(valid_loader)}, test={len(test_loader)}")
