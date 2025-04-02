@@ -56,8 +56,10 @@ def save_tree_data(halo):
     node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
     #export the main branch
     main_branch = list(halo["prog", "Orig_halo_ID"])
-    #mask_main_branch = [node in main_branch for node in node_name]
-    return node_name, node_order, node_feats, edges, main_branch
+    #map node names to indices and reindex the edges accordingly
+    node_to_index = {name: index for index, name in enumerate(node_name)}
+    edge_list = [(node_to_index[source], node_to_index[target]) for source, target in edges]
+    return node_name, node_order, node_feats, edge_list, main_branch
 
 def read_subset_LH(LH_path, root_mass_min):
     ''' 
@@ -137,7 +139,8 @@ def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
 def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
                                  all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
                                  file_name='tree_0_0_0.dat',
-                                 save_path='datasets/merger_trees_h5/'):
+                                 save_path='datasets/merger_trees_h5/',
+                                 save_name='full_data_rank'):
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -145,7 +148,7 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
     print(f"[Rank {rank}] Comm size is {size}")
 
     os.makedirs(save_path, exist_ok=True)
-    fname_out = f'{save_path}/data_rank_{rank}.hdf5'
+    fname_out = f'{save_path}/{save_name}_{rank}.hdf5'
 
     lh_ids = list(range(id_start, id_end))
     lh_info = [
@@ -188,7 +191,7 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
 
 def merge_h5_rank_files(save_path, final_filename='merged_data.hdf5'):
     output_path = os.path.join(save_path, final_filename)
-    rank_files = sorted(glob.glob(os.path.join(save_path, 'data_rank_*.hdf5')))
+    rank_files = sorted(glob.glob(os.path.join(save_path, 'full_data_rank_*.hdf5')))
 
     with h5py.File(output_path, 'w') as f_out:
         for rank_file in rank_files:
@@ -206,15 +209,24 @@ if __name__ == "__main__":
                         default='tree_0_0_0.dat', help='graph dataset file')
     parser.add_argument('--save_path', type=pathlib.Path, \
                         default='datasets/merger_trees_h5/', help='save tree dataset directory')
-    parser.add_argument('--mass_min', type=float, default=5e13, help='minimum mass of root halo (node)')
+    parser.add_argument('--save_name', type=str, default='full_data_rank', help='output h5 file name')
+    parser.add_argument('--mass_min', type=float, default=5e13, help='minimum mass of root halo (node); 5e13 for regular, 1e13 for large')
     parser.add_argument('--id_start', type=int, default=0, help='LH folder start id')
     parser.add_argument('--id_end', type=int, default=1000, help='LH folder end id')
+    parser.add_argument('--post_merge', action="store_true", help='to merge processed files only')
 
 
     args = parser.parse_args()
     # unsafe write!
     # build_h5_fromytree(args.root_mass_min, args.id_start, args.id_end, 
     #                    args.dataset_path, args.file_name, args.save_path)
+
+    # merge after writing
+    if args.post_merge:
+        merge_h5_rank_files(args.save_path)
     # safe write
-    build_h5_fromytree_per_rank(args.mass_min, args.id_start, args.id_end, 
-                        args.dataset_path, args.file_name, args.save_path)
+    else:
+        build_h5_fromytree_per_rank(args.mass_min, args.id_start, args.id_end, 
+                        args.dataset_path, args.file_name, args.save_path, args.save_name)
+
+    
