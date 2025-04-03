@@ -24,42 +24,85 @@ def extract_node_feat(node):
             node['vx'].value, node['vy'].value, node['vz'].value], dtype=np.float32)
     return feat_np.reshape(1,-1) #torch.from_numpy(feat_np).unsqueeze(0).float()
 
-def traverse_tree(halo, height, edge_index=None, node_name=None, node_order=None, node_feat=None):
-    ''' 
-    recursively travese the tree from root to leaves
-    and save the traversed edges to the edge_index
-    together with 
-    - the DFS traversed order (height) to the node_order
-    - associated node features
 
-    '''
+def traverse_tree(halo, height, node_id_map=None, edge_index=None, node_order=None, node_feat=None, counter=None):
+    """
+    Recursively traverse tree and assign unique node IDs using a shared counter (start with counter=[0]).
+    """
     if edge_index is None:
         edge_index = []
-        node_name = []
         node_order = []
         node_feat = []
-    
-    node_ID = halo['Orig_halo_ID']
-    node_name.append(node_ID)    
+        node_id_map = {}
+        counter = [0]  # mutable counter shared across recursion (list mutable, integer is not)
+
+    node_key = halo['Orig_halo_ID']
+    if node_key in node_id_map:
+        return  # already visited
+    curr_id = counter[0]
+    node_id_map[node_key] = curr_id
+    counter[0] += 1
+
     node_order.append(height)
     node_feat.append(extract_node_feat(halo))
+
     ancestors = list(halo.ancestors)
     if ancestors is None:
-        return #bottom of the tree
+        return
+
     for anc in ancestors:
-        edge_index.append((anc['Orig_halo_ID'], node_ID))
-        traverse_tree(anc, height+1, edge_index, node_name, node_order, node_feat)
-    return node_name, node_order, node_feat, edge_index
+        anc_key = anc['Orig_halo_ID']
+        traverse_tree(anc, height + 1, node_id_map, edge_index, node_order, node_feat, counter)
+        anc_id = node_id_map[anc_key]
+        edge_index.append((anc_id, curr_id))  # edge: ancestor → current
+
+    return list(node_id_map.values()), list(node_id_map.keys()), node_order, node_feat, edge_index
 
 def save_tree_data(halo):
     #traverse the tree
-    node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
+    node_id, node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
     #export the main branch
     main_branch = list(halo["prog", "Orig_halo_ID"])
-    #map node names to indices and reindex the edges accordingly
-    node_to_index = {name: index for index, name in enumerate(node_name)}
-    edge_list = [(node_to_index[source], node_to_index[target]) for source, target in edges]
-    return node_name, node_order, node_feats, edge_list, main_branch
+    #mask_main_branch = [node in main_branch for node in node_name]
+    return node_id, node_name, node_order, node_feats, edges, main_branch
+
+
+# def traverse_tree(halo, height, edge_index=None, node_name=None, node_order=None, node_feat=None):
+#     ''' 
+#     recursively travese the tree from root to leaves
+#     and save the traversed edges to the edge_index
+#     together with 
+#     - the DFS traversed order (height) to the node_order
+#     - associated node features
+
+#     '''
+#     if edge_index is None:
+#         edge_index = []
+#         node_name = []
+#         node_order = []
+#         node_feat = []
+    
+#     node_ID = halo['Orig_halo_ID']
+#     node_name.append(node_ID)    
+#     node_order.append(height)
+#     node_feat.append(extract_node_feat(halo))
+#     ancestors = list(halo.ancestors)
+#     if ancestors is None:
+#         return #bottom of the tree
+#     for anc in ancestors:
+#         edge_index.append((anc['Orig_halo_ID'], node_ID))
+#         traverse_tree(anc, height+1, edge_index, node_name, node_order, node_feat)
+#     return node_name, node_order, node_feat, edge_index
+
+# def save_tree_data(halo):
+#     #traverse the tree
+#     node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
+#     #export the main branch
+#     main_branch = list(halo["prog", "Orig_halo_ID"])
+#     #map node names to indices and reindex the edges accordingly
+#     node_to_index = {name: index for index, name in enumerate(node_name)}
+#     edge_list = [(node_to_index[source], node_to_index[target]) for source, target in edges]
+#     return node_name, node_order, node_feats, edge_list, main_branch
 
 def read_subset_LH(LH_path, root_mass_min):
     ''' 
@@ -169,7 +212,7 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
                 grp = f.create_group(group_name)
                 grp.create_dataset('y', data=y)
                 for root in tree_samples:
-                    node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
+                    node_id, node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
 
                     sub_grp = grp.create_group(f"{group_name}_{root['Orig_halo_ID']}")
                     sub_grp.create_dataset('node_name', data=np.array(node_name, dtype='i8'))
@@ -208,7 +251,7 @@ if __name__ == "__main__":
     parser.add_argument('--file_name', type=str, \
                         default='tree_0_0_0.dat', help='graph dataset file')
     parser.add_argument('--save_path', type=pathlib.Path, \
-                        default='datasets/merger_trees_h5/', help='save tree dataset directory')
+                        default='datasets/merger_trees_128/', help='save tree dataset directory')
     parser.add_argument('--save_name', type=str, default='full_data_rank', help='output h5 file name')
     parser.add_argument('--mass_min', type=float, default=5e13, help='minimum mass of root halo (node); 5e13 for regular, 1e13 for large')
     parser.add_argument('--id_start', type=int, default=0, help='LH folder start id')
