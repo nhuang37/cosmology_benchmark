@@ -25,7 +25,8 @@ def extract_node_feat(node):
     return feat_np.reshape(1,-1) #torch.from_numpy(feat_np).unsqueeze(0).float()
 
 
-def traverse_tree(halo, height, node_id_map=None, edge_index=None, node_order=None, node_feat=None, counter=None):
+def traverse_tree(halo, height, parent_id=None,counter=None,
+                  edge_index=None, node_order=None, node_feat=None, node_names=None):
     """
     Recursively traverse tree and assign unique node IDs using a shared counter (start with counter=[0]).
     """
@@ -33,38 +34,33 @@ def traverse_tree(halo, height, node_id_map=None, edge_index=None, node_order=No
         edge_index = []
         node_order = []
         node_feat = []
-        node_id_map = {}
-        counter = [0]  # mutable counter shared across recursion (list mutable, integer is not)
+        node_names = []
+        counter = [0]  # mutable counter shared across recursion (list mutable, integer is not) / increasing order
 
-    node_key = halo['Orig_halo_ID']
-    if node_key in node_id_map:
-        return  # already visited
     curr_id = counter[0]
-    node_id_map[node_key] = curr_id
     counter[0] += 1
-
+    node_names.append(halo['Orig_halo_ID'])
     node_order.append(height)
     node_feat.append(extract_node_feat(halo))
 
-    ancestors = list(halo.ancestors)
-    if ancestors is None:
-        return
+    #record edge from current to parent (directed)
+    if parent_id is not None:
+        edge_index.append((curr_id, parent_id))
 
-    for anc in ancestors:
-        anc_key = anc['Orig_halo_ID']
-        traverse_tree(anc, height + 1, node_id_map, edge_index, node_order, node_feat, counter)
-        anc_id = node_id_map[anc_key]
-        edge_index.append((anc_id, curr_id))  # edge: ancestor → current
-
-    return list(node_id_map.values()), list(node_id_map.keys()), node_order, node_feat, edge_index
+    #recurse into children (ancestor)
+    for anc in list(halo.ancestors):
+        traverse_tree(anc, height + 1, curr_id, counter,
+                      edge_index, node_order, node_feat, node_names)
+        
+    return node_names, node_order, node_feat, edge_index
 
 def save_tree_data(halo):
     #traverse the tree
-    node_id, node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
+    node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
     #export the main branch
     main_branch = list(halo["prog", "Orig_halo_ID"])
     #mask_main_branch = [node in main_branch for node in node_name]
-    return node_id, node_name, node_order, node_feats, edges, main_branch
+    return node_name, node_order, node_feats, edges, main_branch
 
 
 # def traverse_tree(halo, height, edge_index=None, node_name=None, node_order=None, node_feat=None):
@@ -212,7 +208,7 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
                 grp = f.create_group(group_name)
                 grp.create_dataset('y', data=y)
                 for root in tree_samples:
-                    node_id, node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
+                    node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
 
                     sub_grp = grp.create_group(f"{group_name}_{root['Orig_halo_ID']}")
                     sub_grp.create_dataset('node_name', data=np.array(node_name, dtype='i8'))
@@ -251,7 +247,7 @@ if __name__ == "__main__":
     parser.add_argument('--file_name', type=str, \
                         default='tree_0_0_0.dat', help='graph dataset file')
     parser.add_argument('--save_path', type=pathlib.Path, \
-                        default='datasets/merger_trees_128/', help='save tree dataset directory')
+                        default='datasets/merger_trees_1000/', help='save tree dataset directory')
     parser.add_argument('--save_name', type=str, default='full_data_rank', help='output h5 file name')
     parser.add_argument('--mass_min', type=float, default=5e13, help='minimum mass of root halo (node); 5e13 for regular, 1e13 for large')
     parser.add_argument('--id_start', type=int, default=0, help='LH folder start id')

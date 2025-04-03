@@ -3,7 +3,7 @@
 #SBATCH -p ccm
 #SBATCH --mail-user=thuang@flatironinstitute.org
 #SBATCH --mail-type=ALL
-#SBATCH --ntasks=128
+#SBATCH --ntasks=256
 #SBATCH --exclusive
 #SBATCH --time=24:00:00
 #SBATCH -J run_tree_h5
@@ -28,4 +28,4 @@ fi
 
 echo "Running with $NCPU MPI processes..."
 
-srun -n "$NCPU" "$python_exec" tree_h5parallel.py --id_start 0 --id_end 128
+srun -n "$NCPU" "$python_exec" tree_h5parallel.py --id_start 0 --id_end 1000
