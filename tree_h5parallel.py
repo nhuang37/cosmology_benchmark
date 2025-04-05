@@ -108,17 +108,18 @@ def read_subset_LH(LH_path, root_mass_min):
     return: subset of tree_samples (i.e. list of roots), and cosmological param y
     '''
     tree_collection = ytree.load(LH_path)
-    y = np.hstack([tree_collection.hubble_constant, tree_collection.omega_matter], dtype=np.float32).reshape(1,-1)
+    #y = np.hstack([tree_collection.hubble_constant, tree_collection.omega_matter], dtype=np.float32).reshape(1,-1)
     subset = []
     for root in tree_collection:
         if root['Mvir']  > root_mass_min:
             subset.append(root)
-    return subset, y, tree_collection  #avoid garbage collection / ReferenceError
+    return subset, tree_collection  #avoid garbage collection / ReferenceError
 
 
 def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
                         all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
                         file_name='tree_0_0_0.dat',
+                        label_path="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5",
                         save_path='datasets/merger_trees/'):
     ''' 
     Loop over each LH_path from all_LH_paths directory
@@ -130,6 +131,15 @@ def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
     print(f"Comm size is {size}.", verbose=rank == 0)
 
     fname_out = f'{save_path}/data_min={int(root_mass_min/1e13)}e13_start={id_start}_end={id_end}.hdf5'
+
+    # Read labels
+    with h5py.File(label_path, 'r') as f:
+        grp = f["params"]
+        lh_keys = grp['LH'][:]
+        Omega_m = np.array(grp['Omega_m'][:]).reshape(-1,1)
+        sigma_8 = np.array(grp['sigma_8'][:]).reshape(-1,1)
+        y = np.hstack((Omega_m, sigma_8))
+        y_dict =  dict(zip(lh_keys, y))
 
     # Create list of valid LH file paths with IDs
     lh_ids = list(range(id_end))
@@ -147,14 +157,13 @@ def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
     with h5py.File(fname_out, 'w', driver='mpio', comm=comm) as f:
         for lh_id, path in local_info:
             try:
-                tree_samples, y, tree_collection = read_subset_LH(path, root_mass_min)
+                tree_samples, tree_collection = read_subset_LH(path, root_mass_min)
                 group_name= f"LH_{lh_id}"
                 grp = f.create_group(group_name)
-                grp.create_dataset('y', data=y)
+                grp.create_dataset('y', data=y_dict[lh_id])
                 for root in tree_samples:
                     #load the ytree data into np arrays
                     node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
-                    #data['y'] = y #add label attribute 
                     #write to h5 subgroups
                     sub_grp = grp.create_group(f"{group_name}_{root['Orig_halo_ID']}")
                     sub_grp.create_dataset('node_name', data=np.array(node_name, dtype='i8'))
@@ -178,6 +187,7 @@ def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
 def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
                                  all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
                                  file_name='tree_0_0_0.dat',
+                                 label_path="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5",
                                  save_path='datasets/merger_trees_h5/',
                                  save_name='full_data_rank'):
 
@@ -188,6 +198,15 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
 
     os.makedirs(save_path, exist_ok=True)
     fname_out = f'{save_path}/{save_name}_{rank}.hdf5'
+
+    # Read labels
+    with h5py.File(label_path, 'r') as f:
+        grp = f["params"]
+        lh_keys = grp['LH'][:]
+        Omega_m = np.array(grp['Omega_m'][:]).reshape(-1,1)
+        sigma_8 = np.array(grp['sigma_8'][:]).reshape(-1,1)
+        y = np.hstack((Omega_m, sigma_8))
+        y_dict =  dict(zip(lh_keys, y))
 
     lh_ids = list(range(id_start, id_end))
     lh_info = [
@@ -203,10 +222,10 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
     with h5py.File(fname_out, 'w') as f:
         for lh_id, path in local_info:
             try:
-                tree_samples, y, tree_collection = read_subset_LH(path, root_mass_min)
+                tree_samples, tree_collection = read_subset_LH(path, root_mass_min)
                 group_name = f"LH_{lh_id}"
                 grp = f.create_group(group_name)
-                grp.create_dataset('y', data=y)
+                grp.create_dataset('y', data=y_dict[lh_id])
                 for root in tree_samples:
                     node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
 
@@ -246,6 +265,8 @@ if __name__ == "__main__":
                         default='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/', help='dataset parent dir')
     parser.add_argument('--file_name', type=str, \
                         default='tree_0_0_0.dat', help='graph dataset file')
+    parser.add_argument('--label_path', type=str, \
+                        default="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5", help='label dataset file')
     parser.add_argument('--save_path', type=pathlib.Path, \
                         default='datasets/merger_trees_1000/', help='save tree dataset directory')
     parser.add_argument('--save_name', type=str, default='full_data_rank', help='output h5 file name')
@@ -266,6 +287,7 @@ if __name__ == "__main__":
     # safe write
     else:
         build_h5_fromytree_per_rank(args.mass_min, args.id_start, args.id_end, 
-                        args.dataset_path, args.file_name, args.save_path, args.save_name)
+                        args.dataset_path, args.file_name, args.label_path,
+                        args.save_path, args.save_name)
 
     
