@@ -3,6 +3,7 @@ import numpy as np
 import torch 
 from torch.nn.functional import one_hot
 from torch_geometric.data import Data, DataLoader
+from torch_geometric.utils import subgraph
 import random
 import time
 import argparse
@@ -11,6 +12,7 @@ import pickle
 import h5py
 from itertools import compress
 import copy 
+import math
 
 seed = 999
 random.seed(seed)
@@ -19,24 +21,68 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 
-def subset_root(data):
-    data_root = copy.deepcopy(data)
-    data_root['x'] = data_root['x'][0, :].unsqueeze(0)
-    data_root['edge_index'] = None 
-    data_root['pos'] = None 
-    return data_root
-    
-def get_root_only(data_list):
-    ''' 
-    input: list of Data objects from PyG
-    root node is the first node of each Data.x
-    '''
-    subset_roots = [subset_root(data) for data in data_list]
-    return subset_roots
+def find_leaf_nodes(data: Data):
+    """ 
+    Return the leaf nodes from data (torch_geometric.data.Data): The graph data object.
+    """
+    edge_index = data.edge_index  # shape [2, num_edges]
+    num_nodes = data.num_nodes
 
-def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, seed=0, root_only=False):
+    # Nodes with outgoing edges (appear in source/index 0)
+    src_nodes = edge_index[0]
+    all_nodes = torch.arange(num_nodes)
+
+    # Leaf nodes = nodes not in source list
+    leaf_mask = ~torch.isin(all_nodes, src_nodes)
+    leaf_nodes = all_nodes[leaf_mask]
+
+    return leaf_nodes
+
+def get_subset(data, mode='subtree', leaf_threshold=math.log10(3e9)):
+    """
+    Creates a subset tree (subgraph) based on given node feature (mass) threshold
+
+    Args:
+        data (torch_geometric.data.Data): The graph data object.
+        mode: choices in ['subtree', 'root', 'leaf'] where
+        - 'subtree': get a subtree with node mass > leaf_threshold
+        - 'root': retain only the root node
+        - 'leaf': retain only the leaf node
+
+    Returns:
+        torch_geometric.data.Data: The subgraph.
+    """
+    if mode == 'subtree':
+        node_indices = torch.where(data.x[:,0] > leaf_threshold)[0]
+        subset_edge_index, subset_edge_attr = subgraph(node_indices, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=True)
+        
+        subset_node_features = data.x[node_indices]
+        
+        subset_data = Data(x=subset_node_features, 
+                        edge_index=subset_edge_index, 
+                        edge_attr=subset_edge_attr,
+                        y=data.y)
+        subset_leaf_idx = find_leaf_nodes(subset_data)
+        subset_data['leaf_idx'] = subset_leaf_idx
+
+    else:
+        subset_data = copy.deepcopy(data)
+        subset_data['edge_index'] = None
+        subset_data['pos'] = None
+        if mode == 'root':
+            subset_data['x'] = subset_data['x'][0, :].unsqueeze(0)
+        elif mode == 'leaf':
+            subset_data['x'] = subset_data['x'][-1, :].unsqueeze(0)
+        else:
+            raise NotImplementedError
+    
+    return subset_data
+
+
+def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, seed=0, 
+                     subset_flag=True, mode='subtree', leaf_threshold=math.log10(3e9)):
     ''' 
-    80/10/10 train/val/test split based on disjoint cosmo
+    60/40 train/val split based on disjoint cosmo
     '''
     random.seed(seed)
     np.random.seed(seed)
@@ -52,12 +98,15 @@ def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, see
     for lh_id in eval_lh_ids:
         idx_eval_in.extend(np.where(sample_lh == lh_id)[0])
 
-    dataset_train = [dataset[i] for i in idx_train_in]
-    dataset_eval = [dataset[i] for i in idx_eval_in]
-    if root_only:
-        dataset_train = get_root_only(dataset_train)
-        dataset_eval = get_root_only(dataset_eval)
+    if subset_flag:
+        dataset_train = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_train_in]
+        dataset_eval = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_eval_in] 
+    else:
+        dataset_train = [dataset[i] for i in idx_train_in]
+        dataset_eval = [dataset[i] for i in idx_eval_in]
+
     print(f'train_size={len(dataset_train)}, val_size={len(dataset_eval)}')
+    print(f'sampled train data view = {dataset_train[0]}')
     train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle, follow_batch=['x'])
     val_loader = DataLoader(dataset_eval, batch_size=batch_size, shuffle=False, follow_batch=['x'])
 
@@ -262,7 +311,7 @@ def build_PyGdata_fromytree(root_mass_min, root_mass_max, n_samples, id_start=0,
     return data_list
 
 
-def load_single_h5_trees(h5_path, max_trees=None, return_dict=False):
+def load_single_h5_trees(h5_path, max_trees=None, return_dict=False, normalize_first=True, eps=1e-8):
     """
     Reads all merger trees from a single HDF5 file returned from build_h5_fromytree_per_rank().
 
@@ -294,6 +343,8 @@ def load_single_h5_trees(h5_path, max_trees=None, return_dict=False):
             main_branch = tree_group['main_branch'][()]
             node_name = torch.tensor(tree_group['node_name'][()], dtype=torch.long).unsqueeze(1)
             node_feats = torch.tensor(tree_group['node_feats'][()]).float()
+            if normalize_first: #normalize mass, concentration by the root node
+                node_feats[:,:2] = node_feats[:,:2] / (node_feats[0,:2]+eps)
             node_order = torch.tensor(tree_group['node_order'][()], dtype=torch.long).unsqueeze(1)
             edge_index = torch.tensor(tree_group['edge_index'][()], dtype=torch.long).T.contiguous()
 
@@ -317,7 +368,8 @@ def load_single_h5_trees(h5_path, max_trees=None, return_dict=False):
 
     return data_list
 
-def load_merged_h5_trees(h5_path, max_trees=None):
+def load_merged_h5_trees(h5_path, max_trees=None, normalize_first=True, eps=1e-8, denom=1e13,
+                         feat_idx=[0], log_mass=True):
     ''' 
     Load the merged h5 file created from merge_h5_rank_files
     '''
@@ -326,7 +378,8 @@ def load_merged_h5_trees(h5_path, max_trees=None):
         for lh_group_name in f.keys():  # e.g. 'LH_0', 'LH_1', ...
             lh_group = f[lh_group_name]
             y = torch.tensor(lh_group['y'][()], dtype=torch.float32)
-
+            if len(y.shape) == 1:
+                y = y.unsqueeze(0)
             for tree_name in lh_group.keys():
                 if tree_name == 'y':
                     continue
@@ -335,6 +388,14 @@ def load_merged_h5_trees(h5_path, max_trees=None):
                 main_branch = tree_group['main_branch'][()]
                 node_name = torch.tensor(tree_group['node_name'][()], dtype=torch.long).unsqueeze(1)
                 node_feats = torch.tensor(tree_group['node_feats'][()]).float()
+                node_feats = node_feats[:, feat_idx] #subset feature dimension (mass, concen, x, y, z, vx, vy, vz)
+                if normalize_first: #normalize mass, concentration by the root node
+                    node_feats[:,0] = node_feats[:,0] / (node_feats[0,0]+eps)
+                # else: #normalize mass by absolute scalar denom=1e13, keep others (conc., pos. vel) the same
+                #     node_feats[:,0] = node_feats[:,0] / denom
+                if log_mass: #normalize by log
+                    node_feats[:,0] = torch.log10(node_feats[:,0])
+
                 node_order = torch.tensor(tree_group['node_order'][()], dtype=torch.long).unsqueeze(1)
                 edge_index = torch.tensor(tree_group['edge_index'][()], dtype=torch.long).T.contiguous()
 

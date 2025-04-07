@@ -15,6 +15,7 @@ from tree_util import load_single_h5_trees, load_merged_h5_trees, get_root_only,
 from model_tree import TreeGINConv, TreeRegressor, MLPAgg, train_model, eval_model, eval_and_plot
 import argparse
 import pathlib
+import math
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -26,7 +27,6 @@ if __name__ == "__main__":
                         choices=['MPNN', 'TreeMP', 'MLPAgg'], help='model type')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
     parser.add_argument('--target_id', type=int, default=0, help='0: omega_m; 1: sigma_8')
-    parser.add_argument('--node_dim', type=int, default=1, help='use mass only (2: use mass and concentration)')
     parser.add_argument('--hid_dim', type=int, default=16, help='hidden dim')
     parser.add_argument('--n_layer', type=int, default=1, help='number of MP layers')
 
@@ -34,35 +34,38 @@ if __name__ == "__main__":
     parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
 
     parser.add_argument('--root_norm_flag', action="store_true", help='normalize by root mass per tree; otherwise normalize by 1e13 for all')
-
+    parser.add_argument('--feat_idx', type=list, default=[0], help='feature dimension: 0 - mass; 1 - concentration')
+    parser.add_argument('--log_flag', action="store_true", help='normalize the node mass by taking log')
+    parser.add_argument('--leaf_threshold',type=float, default=3e9, help='subset nodes based on their mass (to remove spurious correlation with labels)')
 
     args = parser.parse_args()
 
-    dataset = load_merged_h5_trees(args.data_path, normalize_first=args.root_norm_flag)
+    dataset = load_merged_h5_trees(args.data_path, normalize_first=args.root_norm_flag, 
+                                   feat_idx=args.feat_idx, log_mass=args.log_flag)
     print(len(dataset))       # Total number of trees
-    print(dataset[0].x[:3], dataset[0].y)
+    print(dataset[0].x[:10], dataset[0].y)
 
-    train_loader, val_loader = split_dataloader(dataset, args.batch_size)
+    leaf_threshold = math.log10(args.leaf_threshold) if args.log_flag else args.leaf_threshold
+    train_loader, val_loader = split_dataloader(dataset, args.batch_size, 
+                                                subset_flag=True, mode='subtree',
+                                                leaf_threshold=leaf_threshold)
+    node_dim = len(args.feat_idx)
     out_dim = 1
-    if args.node_dim == 1:
-        mass_flag = True
-    else:
-        mass_flag = False
-        
+    
     mlp_only = False
     if args.model_type == 'MPNN':
     #model = TreeGINConv(node_dim,hid_dim, out_dim)
-        model = TreeRegressor(args.node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=0 )
+        model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=0 )
     elif args.model_type == 'TreeMP':
-        model = TreeRegressor(args.node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=30)
+        model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=30)
     elif args.model_type == 'MLPAgg':
-        model = MLPAgg(args.node_dim, args.hid_dim, out_dim)
+        model = MLPAgg(node_dim, args.hid_dim, out_dim)
         mlp_only = True
     else:
         raise NotImplementedError
 
-    model_name = f"{args.model_type}_target_{args.target_id}_norm={args.root_norm_flag}_input={args.node_dim}_hid={args.hid_dim}_lr={args.lr}_ep={args.num_epochs}_bs={args.batch_size}"
-    train_model(model, train_loader, target_id=args.target_id, mass_only=mass_flag, mlp_only=mlp_only,
+    model_name = f"{args.model_type}_target_{args.target_id}_norm={args.root_norm_flag}_log={args.log_flag}_input={node_dim}_hid={args.hid_dim}_lr={args.lr}_ep={args.num_epochs}_bs={args.batch_size}"
+    train_model(model, train_loader, target_id=args.target_id, mlp_only=mlp_only,
                 n_epochs=args.num_epochs, lr=args.lr, save_path=f"{args.save_path}/{model_name}.pt")
-    eval_and_plot(model, train_loader, val_loader, target_id=args.target_id, mass_only=mass_flag, 
+    eval_and_plot(model, train_loader, val_loader, target_id=args.target_id, 
               mlp_only=mlp_only, model_name=model_name, fig_path=f"{args.save_path}/{model_name}.png")

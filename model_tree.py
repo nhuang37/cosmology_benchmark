@@ -50,19 +50,22 @@ class TreeGINConv(MessagePassing):
         return h
     
 class TreeRegressor(nn.Module):
-    def __init__(self, node_dim, hid_dim, out_dim, n_layer=1, loop_flag=True, cut=0):
+    def __init__(self, node_dim, hid_dim, out_dim, n_layer=1, loop_flag=True, 
+                 cut=0, global_feat_dim=0):
         super(TreeRegressor, self).__init__()
         self.conv_layers = nn.ModuleList([TreeGINConv(node_dim, hid_dim, hid_dim, loop_flag, cut)])
         for layer in range(n_layer - 1):
             self.conv_layers.append(TreeGINConv(hid_dim, hid_dim, hid_dim, loop_flag, cut))
-        self.regressor = Seq(Lin(hid_dim, hid_dim), 
+        self.regressor = Seq(Lin(hid_dim+global_feat_dim, hid_dim), 
                               ReLU(), 
                               Lin(hid_dim, out_dim)) #Lin(hid_dim, out_dim)
 
-    def forward(self, x, edge_index, pos, x_batch):
+    def forward(self, x, edge_index, pos, x_batch, global_feat=None):
         for layer in self.conv_layers:
             x = layer(x, edge_index, pos)
         tree_out = scatter_mean(x, x_batch, dim=0)
+        if global_feat is not None: #(bs, global_feat_dim)
+            tree_out = torch.cat((tree_out, global_feat), dim=0)
         tree_pred = self.regressor(tree_out)
         return tree_pred
 
@@ -82,26 +85,24 @@ class MLPAgg(nn.Module):
     
 
 
-def train_model(model, train_loader, mass_only=True, mlp_only=False,
+def train_model(model, train_loader, mlp_only=False,
                 n_epochs=100, lr=1e-2, target_id=1, save_path=None):
-    criterion = nn.L1Loss(reduction='sum')
+    criterion = nn.L1Loss(reduction='mean')
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     step = 0
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
     model.train()
-    feat_dim = 1 if mass_only else 2
     for i in range(n_epochs):
         loss_ep = 0
         #for data in data_list:
         for data in train_loader:
             data = data.to(device)
-            x = data.x[:,:feat_dim] 
             if mlp_only:
-                om_pred = model(x, data.x_batch)
+                om_pred = model(data.x, data.x_batch)
             else:
                 #orders = [torch.ones(x.shape[0]).bool().to(device)]
-                om_pred = model(x, data.edge_index, data.pos, data.x_batch) 
+                om_pred = model(data.x, data.edge_index, data.pos, data.x_batch) 
             #om_pred = scatter_mean(om_pred_node, data.x_batch, dim=0)
             #print(om_pred, data.y.float())
             loss = criterion(om_pred, data.y[:,target_id].unsqueeze(1).float()) #predicting omega_matter
@@ -116,23 +117,21 @@ def train_model(model, train_loader, mass_only=True, mlp_only=False,
     if save_path is not None:
         torch.save(model.state_dict(), save_path)
     
-def eval_model(model, eval_loader, mass_only=True, mlp_only=False,
+def eval_model(model, eval_loader, mlp_only=False,
                 target_id=1):
     ##eval - assume full batch
     criterion = nn.L1Loss(reduction='sum')
     model.eval()
     device = next(model.parameters()).device
-    feat_dim = 1 if mass_only else 2
     target, pred = [], []
     loss = 0
     samples = 0
     for data in eval_loader:
         data = data.to(device)
-        x = data.x[:,:feat_dim] 
         if mlp_only:
-            om_pred = model(x, data.x_batch)
+            om_pred = model(data.x, data.x_batch)
         else:
-            om_pred = model(x, data.edge_index, data.pos, data.x_batch) 
+            om_pred = model(data.x, data.edge_index, data.pos, data.x_batch) 
         loss += criterion(om_pred, data.y[:,target_id].unsqueeze(1)).item()
         samples += data.y.shape[0]
         target.extend(data.y[:,target_id].detach().cpu())
@@ -149,16 +148,14 @@ def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_
     target_name = r"$\Omega_m$" if target_id == 0 else r"$\sigma_8$"
     plt.xlabel(f"target {target_name}")
     plt.ylabel(f"predicted {target_name}")
-    plt.title(f"model_name \n train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+    plt.title(f"{model_name} \n train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
     if fig_path is not None:
         plt.savefig(fig_path, dpi=150)
 
 
 def eval_and_plot(model, train_loader, val_loader, target_id=0, mass_only=True, 
                   mlp_only=False, model_name='MPNN', fig_path=None):
-    train_target, train_pred, train_loss = eval_model(model, train_loader, mass_only, 
-                                                      mlp_only, target_id)
-    val_target, val_pred, val_loss = eval_model(model, val_loader, mass_only, 
-                                                      mlp_only, target_id)
+    train_target, train_pred, train_loss = eval_model(model, train_loader, mlp_only, target_id)
+    val_target, val_pred, val_loss = eval_model(model, val_loader, mlp_only, target_id)
     plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
                 model_name, target_id, fig_path)
