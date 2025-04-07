@@ -82,20 +82,21 @@ class MLPAgg(nn.Module):
     
 
 
-def train_model(model, train_loader, mlp_only=False,
-                n_epochs=100, lr=1e-2, target_id=1, scaling_factor=1e13):
-    criterion = nn.L1Loss(reduce='sum')
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+def train_model(model, train_loader, mass_only=True, mlp_only=False,
+                n_epochs=100, lr=1e-2, target_id=1, save_path=None):
+    criterion = nn.L1Loss(reduction='sum')
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
     step = 0
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
     model.train()
+    feat_dim = 1 if mass_only else 2
     for i in range(n_epochs):
         loss_ep = 0
         #for data in data_list:
         for data in train_loader:
             data = data.to(device)
-            x = data.x[:,:1] / scaling_factor 
+            x = data.x[:,:feat_dim] 
             if mlp_only:
                 om_pred = model(x, data.x_batch)
             else:
@@ -103,7 +104,7 @@ def train_model(model, train_loader, mlp_only=False,
                 om_pred = model(x, data.edge_index, data.pos, data.x_batch) 
             #om_pred = scatter_mean(om_pred_node, data.x_batch, dim=0)
             #print(om_pred, data.y.float())
-            loss = criterion(om_pred, data.y[:,target_id:target_id+1].float()) #predicting omega_matter
+            loss = criterion(om_pred, data.y[:,target_id].unsqueeze(1).float()) #predicting omega_matter
             #loss_hist.append(loss.item())
             loss_ep += loss.item()
             optimizer.zero_grad()
@@ -112,19 +113,52 @@ def train_model(model, train_loader, mlp_only=False,
             step +=1
         if (i+1) % 10 == 0:
             print(f'epoch={i}, loss={(loss_ep/len(train_loader)):.4f}')
+    if save_path is not None:
+        torch.save(model.state_dict(), save_path)
     
-def eval_model(model, eval_loader,  mlp_only=False,
-                target_id=1, scaling_factor=1e13):
+def eval_model(model, eval_loader, mass_only=True, mlp_only=False,
+                target_id=1):
     ##eval - assume full batch
-    criterion = nn.L1Loss(reduce='sum')
+    criterion = nn.L1Loss(reduction='sum')
     model.eval()
-    data = next(iter(eval_loader))
     device = next(model.parameters()).device
-    data = data.to(device)
-    x = data.x[:,:1] / scaling_factor 
-    if mlp_only:
-        om_pred = model(x, data.x_batch)
-    else:
-        om_pred = model(x, data.edge_index, data.pos, data.x_batch) 
-    loss = criterion(om_pred, data.y[:,target_id:target_id+1]).item()
-    return data.y[:,target_id:target_id+1].detach().cpu(), om_pred.detach().cpu(), loss
+    feat_dim = 1 if mass_only else 2
+    target, pred = [], []
+    loss = 0
+    samples = 0
+    for data in eval_loader:
+        data = data.to(device)
+        x = data.x[:,:feat_dim] 
+        if mlp_only:
+            om_pred = model(x, data.x_batch)
+        else:
+            om_pred = model(x, data.edge_index, data.pos, data.x_batch) 
+        loss += criterion(om_pred, data.y[:,target_id].unsqueeze(1)).item()
+        samples += data.y.shape[0]
+        target.extend(data.y[:,target_id].detach().cpu())
+        pred.extend(om_pred.flatten().detach().cpu())
+    loss_avg = loss/samples
+    return target, pred, loss_avg
+
+def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
+                model_name, target_id, fig_path, s=5):
+    plt.scatter(train_target, train_pred, s=s, label='training', color='tab:blue', alpha=0.6)
+    plt.scatter(val_target, val_pred, s=s, label="validation", color='tab:orange', alpha=0.6)
+    plt.axline((0, 0), slope=1, color='gray', linestyle=':', label='y=x')
+    plt.legend()
+    target_name = r"$\Omega_m$" if target_id == 0 else r"$\sigma_8$"
+    plt.xlabel(f"target {target_name}")
+    plt.ylabel(f"predicted {target_name}")
+    plt.title(f"model_name \n train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+    if fig_path is not None:
+        plt.savefig(fig_path, dpi=150)
+
+
+def eval_and_plot(model, train_loader, val_loader, target_id=0, mass_only=True, 
+                  mlp_only=False, model_name='MPNN', fig_path=None):
+    train_target, train_pred, train_loss = eval_model(model, train_loader, mass_only, 
+                                                      mlp_only, target_id)
+    val_target, val_pred, val_loss = eval_model(model, val_loader, mass_only, 
+                                                      mlp_only, target_id)
+    plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
+                model_name, target_id, fig_path)
