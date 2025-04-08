@@ -83,44 +83,59 @@ class MLPAgg(nn.Module):
         tree_pred = scatter_mean(node_out, x_batch, dim=0)
         return tree_pred
     
-
-
-def train_model(model, train_loader, mlp_only=False,
-                n_epochs=100, lr=1e-2, target_id=1, save_path=None):
-    criterion = nn.L1Loss(reduction='mean')
+def train_eval_model(model, train_loader, val_loader, 
+                     mlp_only=False, n_epochs=100, lr=1e-2, 
+                     eval_every=1,
+                     target_id=0, save_path=None):
     optimizer = optim.AdamW(model.parameters(), lr=lr)
-    step = 0
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
-    model.train()
+    train_loss_steps, val_loss_eps = [], []
     for i in range(n_epochs):
-        loss_ep = 0
-        #for data in data_list:
-        for data in train_loader:
-            data = data.to(device)
-            if mlp_only:
-                om_pred = model(data.x, data.x_batch)
-            else:
-                #orders = [torch.ones(x.shape[0]).bool().to(device)]
-                om_pred = model(data.x, data.edge_index, data.pos, data.x_batch) 
-            #om_pred = scatter_mean(om_pred_node, data.x_batch, dim=0)
-            #print(om_pred, data.y.float())
-            loss = criterion(om_pred, data.y[:,target_id].unsqueeze(1).float()) #predicting omega_matter
-            #loss_hist.append(loss.item())
-            loss_ep += loss.item()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            step +=1
-        if (i+1) % 10 == 0:
-            print(f'epoch={i}, loss={(loss_ep/len(train_loader)):.4f}')
+        train_loss = train_model(model, train_loader, optimizer,
+                                 mlp_only, target_id)
+        train_loss_steps.extend(train_loss)
+        if (i+1) % eval_every == 0:
+            _, _, val_loss = eval_model(model, val_loader, 
+                                  mlp_only, target_id)
+            val_loss_eps.append(val_loss)
+            train_loss_avg = sum(train_loss)/len(train_loss)
+            print(f'epoch={i}, train_loss={train_loss_avg:.4f}, val_loss={val_loss:.4f}')
+
     if save_path is not None:
         torch.save(model.state_dict(), save_path)
+
+    return train_loss_steps, val_loss_eps
     
-def eval_model(model, eval_loader, mlp_only=False,
-                target_id=1):
+def train_model(model, train_loader, optimizer,
+                mlp_only, target_id, 
+                criterion=nn.L1Loss(reduction='mean')):
+    model.train()
+    loss_hist = []
+    device = next(model.parameters()).device
+    #for data in data_list:
+    for data in train_loader:
+        data = data.to(device)
+        if mlp_only:
+            om_pred = model(data.x, data.x_batch)
+        else:
+            #orders = [torch.ones(x.shape[0]).bool().to(device)]
+            om_pred = model(data.x, data.edge_index, data.pos, data.x_batch) 
+        #om_pred = scatter_mean(om_pred_node, data.x_batch, dim=0)
+        #print(om_pred, data.y.float())
+        loss = criterion(om_pred, data.y[:,target_id].unsqueeze(1).float()) #predicting omega_matter
+        #loss_hist.append(loss.item())
+        loss_hist.append(loss.item())
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    return loss_hist
+
+
+def eval_model(model, eval_loader, 
+               mlp_only, target_id, 
+               criterion=nn.L1Loss(reduction='sum')):
     ##eval - assume full batch
-    criterion = nn.L1Loss(reduction='sum')
     model.eval()
     device = next(model.parameters()).device
     target, pred = [], []
@@ -139,6 +154,43 @@ def eval_model(model, eval_loader, mlp_only=False,
     loss_avg = loss/samples
     return target, pred, loss_avg
 
+# def train_model(model, train_loader, mlp_only=False,
+#                 n_epochs=100, lr=1e-2, target_id=1, save_path=None):
+#     criterion = nn.L1Loss(reduction='mean') #nn.MSELoss() #
+#     optimizer = optim.AdamW(model.parameters(), lr=lr)
+#     step = 0
+#     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+#     model = model.to(device)
+#     model.train()
+#     loss_hist = []
+#     for i in range(n_epochs):
+#         loss_ep = 0
+#         #for data in data_list:
+#         for data in train_loader:
+#             data = data.to(device)
+#             if mlp_only:
+#                 om_pred = model(data.x, data.x_batch)
+#             else:
+#                 #orders = [torch.ones(x.shape[0]).bool().to(device)]
+#                 om_pred = model(data.x, data.edge_index, data.pos, data.x_batch) 
+#             #om_pred = scatter_mean(om_pred_node, data.x_batch, dim=0)
+#             #print(om_pred, data.y.float())
+#             loss = criterion(om_pred, data.y[:,target_id].unsqueeze(1).float()) #predicting omega_matter
+#             #loss_hist.append(loss.item())
+#             loss_ep += loss.item()
+#             optimizer.zero_grad()
+#             loss.backward()
+#             optimizer.step()
+#             step +=1
+#         loss_avg = loss_ep/len(train_loader)
+#         loss_hist.append(loss_avg)
+#         if (i+1) % 10 == 0:
+#             print(f'epoch={i}, loss={loss_avg:.4f}')
+#     if save_path is not None:
+#         torch.save(model.state_dict(), save_path)
+#     return loss_hist
+    
+
 def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
                 model_name, target_id, fig_path, s=5):
     plt.scatter(train_target, train_pred, s=s, label='training', color='tab:blue', alpha=0.6)
@@ -153,9 +205,26 @@ def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_
         plt.savefig(fig_path, dpi=150)
 
 
-def eval_and_plot(model, train_loader, val_loader, target_id=0, mass_only=True, 
+def eval_and_plot(model, train_loader, val_loader, target_id=0, 
                   mlp_only=False, model_name='MPNN', fig_path=None):
     train_target, train_pred, train_loss = eval_model(model, train_loader, mlp_only, target_id)
     val_target, val_pred, val_loss = eval_model(model, val_loader, mlp_only, target_id)
     plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
                 model_name, target_id, fig_path)
+    return train_loss, val_loss
+
+def plot_train_val_loss(results, save_path):
+    fig, axs =  plt.subplots(ncols=2, figsize=(12,4), dpi=150, sharey=True)
+    axs[0].plot(results['train_steps'], color='tab:blue')
+    axs[0].set_xlabel('gradient steps')
+    axs[0].set_ylabel('loss')
+    axs[0].set_title('training loss')
+    axs[1].plot(results['val'], color='tab:orange', alpha=0.8)
+    axs[1].set_xlabel('epoch')
+    axs[1].set_ylabel('loss')
+    axs[1].set_title('validation loss')
+
+    for ax in axs:
+        ax.set_yscale('log')
+    fig.savefig(save_path, dpi=150)
+

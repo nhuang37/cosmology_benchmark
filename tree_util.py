@@ -79,10 +79,10 @@ def get_subset(data, mode='subtree', leaf_threshold=math.log10(3e9)):
     return subset_data
 
 
-def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, seed=0, 
-                     subset_flag=False, mode='subtree', leaf_threshold=math.log10(3e9)):
+def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, val_ratio=0.2, seed=0, 
+                     subset_flag=False, mode='subtree', leaf_threshold=math.log10(3e9), train_n_sample=1):
     ''' 
-    60/40 train/val split based on disjoint cosmo
+    60/20/20 train/val/test split based on disjoint cosmo
     '''
     random.seed(seed)
     np.random.seed(seed)
@@ -90,27 +90,32 @@ def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, see
     values, count = np.unique(sample_lh, return_counts=True)
     perm_values = np.random.permutation(values)
     split_train = int(len(perm_values) * train_ratio)
+    split_val = int(len(perm_values) * (train_ratio+val_ratio))
     train_lh_ids = perm_values[:split_train]
-    eval_lh_ids = perm_values[split_train:]
-    idx_train_in, idx_eval_in = [], []
-    for lh_id in train_lh_ids: 
-        idx_train_in.extend(np.where(sample_lh == lh_id)[0])
-    for lh_id in eval_lh_ids:
-        idx_eval_in.extend(np.where(sample_lh == lh_id)[0])
+    val_lh_ids = perm_values[split_train:split_val]
+    test_lh_ids = perm_values[split_val:]
+    idx_train, idx_val, idx_test = [], [], []
+    for subset_lh_ids, subset_idx in zip([train_lh_ids, val_lh_ids, test_lh_ids], [idx_train, idx_val, idx_test]):
+        for lh_id in subset_lh_ids:
+            subset_idx.extend(np.where(sample_lh == lh_id)[0][:train_n_sample]) #counteract the class imbalance induced by omega_m
 
     if subset_flag:
-        dataset_train = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_train_in]
-        dataset_eval = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_eval_in] 
-    else:
-        dataset_train = [dataset[i] for i in idx_train_in]
-        dataset_eval = [dataset[i] for i in idx_eval_in]
+        dataset_train = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_train]
+        dataset_val = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_val] 
+        dataset_test = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_test] 
 
-    print(f'train_size={len(dataset_train)}, val_size={len(dataset_eval)}')
+    else:
+        dataset_train = [dataset[i] for i in idx_train]
+        dataset_val = [dataset[i] for i in idx_val]
+        dataset_test =  [dataset[i] for i in idx_test]
+
+    print(f'train_size={len(dataset_train)}, val_size={len(dataset_val)}, test_size={len(dataset_test)}')
     print(f'sampled train data view = {dataset_train[0]}')
     train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle, follow_batch=['x'])
-    val_loader = DataLoader(dataset_eval, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+    val_loader = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+    test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False, follow_batch=['x'])
 
-    return train_loader, val_loader
+    return train_loader, val_loader, test_loader
 
 def split_dataset_corr(dataset, seed=0, cut=5, train_n_sample=4, eval_n_sample=1):
     ''' 
@@ -400,7 +405,7 @@ def load_merged_h5_trees(h5_path, max_trees=None, normalize_mode='particle', eps
                 main_branch = tree_group['main_branch'][()]
                 node_name = torch.tensor(tree_group['node_name'][()], dtype=torch.long).unsqueeze(1)
                 node_feats = torch.tensor(tree_group['node_feats'][()]).float()
-                node_feats = node_feats[:, feat_idx] #subset feature dimension (mass, concen, x, y, z, vx, vy, vz)
+                #all possible mass normalization strategies
                 if normalize_mode == 'first': #normalize mass, concentration by the root node
                     node_feats[:,0] = node_feats[:,0] / (node_feats[0,0]+eps)
                 elif normalize_mode == 'particle': #normalize by particle mass
@@ -412,7 +417,7 @@ def load_merged_h5_trees(h5_path, max_trees=None, normalize_mode='particle', eps
                 #     node_feats[:,0] = node_feats[:,0] / denom
                 if log_mass: #normalize by log
                     node_feats[:,0] = torch.log10(node_feats[:,0])
-
+                node_feats = node_feats[:, feat_idx] #subset feature dimension (mass, concen, x, y, z, vx, vy, vz)
                 node_order = torch.tensor(tree_group['node_order'][()], dtype=torch.long).unsqueeze(1)
                 edge_index = torch.tensor(tree_group['edge_index'][()], dtype=torch.long).T.contiguous()
 
