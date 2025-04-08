@@ -80,7 +80,7 @@ def get_subset(data, mode='subtree', leaf_threshold=math.log10(3e9)):
 
 
 def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, seed=0, 
-                     subset_flag=True, mode='subtree', leaf_threshold=math.log10(3e9)):
+                     subset_flag=False, mode='subtree', leaf_threshold=math.log10(3e9)):
     ''' 
     60/40 train/val split based on disjoint cosmo
     '''
@@ -368,10 +368,22 @@ def load_single_h5_trees(h5_path, max_trees=None, return_dict=False, normalize_f
 
     return data_list
 
-def load_merged_h5_trees(h5_path, max_trees=None, normalize_first=True, eps=1e-8, denom=1e13,
+def mass_particle(omega_m):
+    ''' 
+    compute particle mass as a function of omega_m
+    '''
+    rho_crit = 277.53663
+    L = 100e3
+    nres = 640
+    return L**3 * omega_m * rho_crit / nres**3
+
+def load_merged_h5_trees(h5_path, max_trees=None, normalize_mode='particle', eps=1e-8, denom=1e13,
                          feat_idx=[0], log_mass=True):
     ''' 
     Load the merged h5 file created from merge_h5_rank_files
+    normalize_mode:
+    - 'particle': divide by the particle_mass as a function of omega_m ( see mass_particle) 
+    - 'first': divide by the first root node mass (not critical)
     '''
     data_list = []
     with h5py.File(h5_path, 'r') as f:
@@ -389,8 +401,13 @@ def load_merged_h5_trees(h5_path, max_trees=None, normalize_first=True, eps=1e-8
                 node_name = torch.tensor(tree_group['node_name'][()], dtype=torch.long).unsqueeze(1)
                 node_feats = torch.tensor(tree_group['node_feats'][()]).float()
                 node_feats = node_feats[:, feat_idx] #subset feature dimension (mass, concen, x, y, z, vx, vy, vz)
-                if normalize_first: #normalize mass, concentration by the root node
+                if normalize_mode == 'first': #normalize mass, concentration by the root node
                     node_feats[:,0] = node_feats[:,0] / (node_feats[0,0]+eps)
+                elif normalize_mode == 'particle': #normalize by particle mass
+                    mpart = mass_particle(y[0,0]) #
+                    node_feats[:,0] = node_feats[:,0] / (mpart+eps)
+                else:
+                    raise NotImplementedError
                 # else: #normalize mass by absolute scalar denom=1e13, keep others (conc., pos. vel) the same
                 #     node_feats[:,0] = node_feats[:,0] / denom
                 if log_mass: #normalize by log

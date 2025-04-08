@@ -11,7 +11,7 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
-from tree_util import load_single_h5_trees, load_merged_h5_trees, get_root_only, split_dataloader, split_dataset_corr
+from tree_util import load_single_h5_trees, load_merged_h5_trees, split_dataloader, split_dataset_corr
 from model_tree import TreeGINConv, TreeRegressor, MLPAgg, train_model, eval_model, eval_and_plot
 import argparse
 import pathlib
@@ -33,22 +33,21 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=5e-3, help='learning rate')
     parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
 
-    parser.add_argument('--root_norm_flag', action="store_true", help='normalize by root mass per tree; otherwise normalize by 1e13 for all')
+    parser.add_argument('--normalize_mode',type=str, default='particle',
+                        choices=["particle","first"], help='normalize by particle weight (roughly ~omega_m), or root particle masss')
     parser.add_argument('--feat_idx', type=list, default=[0], help='feature dimension: 0 - mass; 1 - concentration')
     parser.add_argument('--log_flag', action="store_true", help='normalize the node mass by taking log')
     parser.add_argument('--leaf_threshold',type=float, default=3e9, help='subset nodes based on their mass (to remove spurious correlation with labels)')
 
     args = parser.parse_args()
 
-    dataset = load_merged_h5_trees(args.data_path, normalize_first=args.root_norm_flag, 
+    dataset = load_merged_h5_trees(args.data_path, normalize_mode=args.normalize_mode, 
                                    feat_idx=args.feat_idx, log_mass=args.log_flag)
     print(len(dataset))       # Total number of trees
     print(dataset[0].x[:10], dataset[0].y)
 
-    leaf_threshold = math.log10(args.leaf_threshold) if args.log_flag else args.leaf_threshold
-    train_loader, val_loader = split_dataloader(dataset, args.batch_size, 
-                                                subset_flag=True, mode='subtree',
-                                                leaf_threshold=leaf_threshold)
+    #leaf_threshold = math.log10(args.leaf_threshold) if args.log_flag else args.leaf_threshold
+    train_loader, val_loader = split_dataloader(dataset, args.batch_size)
     node_dim = len(args.feat_idx)
     out_dim = 1
     
@@ -64,7 +63,7 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError
 
-    model_name = f"{args.model_type}_target_{args.target_id}_norm={args.root_norm_flag}_log={args.log_flag}_input={node_dim}_hid={args.hid_dim}_lr={args.lr}_ep={args.num_epochs}_bs={args.batch_size}"
+    model_name = f"{args.model_type}_target_{args.target_id}_norm={args.normalize_mode}_log={args.log_flag}_input={node_dim}_hid={args.hid_dim}_lr={args.lr}_ep={args.num_epochs}_bs={args.batch_size}"
     train_model(model, train_loader, target_id=args.target_id, mlp_only=mlp_only,
                 n_epochs=args.num_epochs, lr=args.lr, save_path=f"{args.save_path}/{model_name}.pt")
     eval_and_plot(model, train_loader, val_loader, target_id=args.target_id, 
