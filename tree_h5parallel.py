@@ -7,6 +7,23 @@ import time
 import argparse
 import pathlib
 import glob
+import math
+
+def mass_particle(omega_m):
+    ''' 
+    compute particle mass as a function of omega_m
+    '''
+    rho_crit = 277.53663
+    L = 100e3
+    nres = 640
+    return L**3 * omega_m * rho_crit / nres**3
+
+def compute_log_mass_by_mpart(mass, omega_m, eps=1e-8):
+    '''
+    return log(mass / mpart), where mpart=mass_particle(omega_m)
+    '''
+    mpart = mass_particle(omega_m)
+    return math.log10(mass/ (mpart + eps))
 
 def compute_concentration(halo):
     return halo["Rvir"] / halo["rs"]
@@ -19,9 +36,11 @@ def extract_node_feat(node):
     concentration: 
     '''
     concentration = compute_concentration(node)
-    feat_np = np.hstack([node['Mvir'].value, concentration.value,
+    feat_np = np.hstack([node['Mvir'].value, concentration.value, 
+                         node['vmax'].value, node['Spin'], node['scale'], #note Spin and scale are dimensionless quantity!
             node['x'].value, node['y'].value, node['z'].value, 
-            node['vx'].value, node['vy'].value, node['vz'].value], dtype=np.float32)
+            node['vx'].value, node['vy'].value, node['vz'].value,
+            node['Jx'].value, node['Jy'].value, node['Jz'].value], dtype=np.float32)
     return feat_np.reshape(1,-1) #torch.from_numpy(feat_np).unsqueeze(0).float()
 
 
@@ -100,96 +119,102 @@ def save_tree_data(halo):
 #     edge_list = [(node_to_index[source], node_to_index[target]) for source, target in edges]
 #     return node_name, node_order, node_feats, edge_list, main_branch
 
-def read_subset_LH(LH_path, root_mass_min):
+def read_subset_LH(LH_path, root_logNpart_min=5.0):
     ''' 
     Given a LH folder path LH_path with a fixed label (sigma_8, omega_m), 
     read into the ytree data 'tree_0_0_0.dat', which contains ~1e5 trees
-    extract the subset with root mass greater than root_mass_min
+    NEW: extract the subset with log(Nparticle) > 0.5
+    OLD:extract the subset with root mass greater than root_mass_min -> outdated
     return: subset of tree_samples (i.e. list of roots), and cosmological param y
     '''
     tree_collection = ytree.load(LH_path)
+    om = tree_collection.omega_matter
     #y = np.hstack([tree_collection.hubble_constant, tree_collection.omega_matter], dtype=np.float32).reshape(1,-1)
     subset = []
     for root in tree_collection:
-        if root['Mvir']  > root_mass_min:
+        root_logNpart = compute_log_mass_by_mpart(root['Mvir'], om)
+        if root_logNpart > root_logNpart_min:
             subset.append(root)
+        # if root['Mvir']  > root_mass_min:
+        #     subset.append(root)
     return subset, tree_collection  #avoid garbage collection / ReferenceError
 
 
-def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
-                        all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
-                        file_name='tree_0_0_0.dat',
-                        label_path="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5",
-                        save_path='datasets/merger_trees/'):
-    ''' 
-    Loop over each LH_path from all_LH_paths directory
-    then apply read_subset_LH(LH_path, kargs**) to extract n_samples trees per LH_path
-    '''
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-    print(f"Comm size is {size}.", verbose=rank == 0)
+# def build_h5_fromytree(root_mass_min, id_start=0, id_end=1000,
+#                         all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
+#                         file_name='tree_0_0_0.dat',
+#                         label_path="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5",
+#                         save_path='datasets/merger_trees/'):
+#     ''' 
+#     Loop over each LH_path from all_LH_paths directory
+#     then apply read_subset_LH(LH_path, kargs**) to extract n_samples trees per LH_path
+#     '''
+#     comm = MPI.COMM_WORLD
+#     rank = comm.Get_rank()
+#     size = comm.Get_size()
+#     print(f"Comm size is {size}.", verbose=rank == 0)
 
-    fname_out = f'{save_path}/data_min={int(root_mass_min/1e13)}e13_start={id_start}_end={id_end}.hdf5'
+#     fname_out = f'{save_path}/data_min={int(root_mass_min/1e13)}e13_start={id_start}_end={id_end}.hdf5'
 
-    # Read labels
-    with h5py.File(label_path, 'r') as f:
-        grp = f["params"]
-        lh_keys = grp['LH'][:]
-        Omega_m = np.array(grp['Omega_m'][:]).reshape(-1,1)
-        sigma_8 = np.array(grp['sigma_8'][:]).reshape(-1,1)
-        y = np.hstack((Omega_m, sigma_8))
-        y_dict =  dict(zip(lh_keys, y))
+#     # Read labels
+#     with h5py.File(label_path, 'r') as f:
+#         grp = f["params"]
+#         lh_keys = grp['LH'][:]
+#         Omega_m = np.array(grp['Omega_m'][:]).reshape(-1,1)
+#         sigma_8 = np.array(grp['sigma_8'][:]).reshape(-1,1)
+#         y = np.hstack((Omega_m, sigma_8))
+#         y_dict =  dict(zip(lh_keys, y))
 
-    # Create list of valid LH file paths with IDs
-    lh_ids = list(range(id_end))
-    lh_info = [
-        (lh_id, os.path.join(all_LH_paths, f"LH_{lh_id}/ConsistentTrees/{file_name}"))
-        for lh_id in lh_ids
-    ]
-    lh_info = [(lh_id, path) for lh_id, path in lh_info if os.path.exists(path)]
+#     # Create list of valid LH file paths with IDs
+#     lh_ids = list(range(id_end))
+#     lh_info = [
+#         (lh_id, os.path.join(all_LH_paths, f"LH_{lh_id}/ConsistentTrees/{file_name}"))
+#         for lh_id in lh_ids
+#     ]
+#     lh_info = [(lh_id, path) for lh_id, path in lh_info if os.path.exists(path)]
 
-    # Split work across MPI ranks
-    local_info = lh_info[rank::size]
+#     # Split work across MPI ranks
+#     local_info = lh_info[rank::size]
     
-    start = time.time()
+#     start = time.time()
 
-    with h5py.File(fname_out, 'w', driver='mpio', comm=comm) as f:
-        for lh_id, path in local_info:
-            try:
-                tree_samples, tree_collection = read_subset_LH(path, root_mass_min)
-                group_name= f"LH_{lh_id}"
-                grp = f.create_group(group_name)
-                grp.create_dataset('y', data=y_dict[lh_id])
-                for root in tree_samples:
-                    #load the ytree data into np arrays
-                    node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
-                    #write to h5 subgroups
-                    sub_grp = grp.create_group(f"{group_name}_{root['Orig_halo_ID']}")
-                    sub_grp.create_dataset('node_name', data=np.array(node_name, dtype='i8'))
-                    sub_grp.create_dataset('node_order', data=np.array(node_order, dtype='i8'))
-                    sub_grp.create_dataset('node_feats', data=np.concatenate(node_feats, axis=0))
-                    sub_grp.create_dataset('edge_index', data=np.array(edges, dtype='i8'))
-                    sub_grp.create_dataset('main_branch', data=np.array(main_branch, dtype='i8'))
+#     with h5py.File(fname_out, 'w', driver='mpio', comm=comm) as f:
+#         for lh_id, path in local_info:
+#             try:
+#                 tree_samples, tree_collection = read_subset_LH(path, root_mass_min)
+#                 group_name= f"LH_{lh_id}"
+#                 grp = f.create_group(group_name)
+#                 grp.create_dataset('y', data=y_dict[lh_id])
+#                 for root in tree_samples:
+#                     #load the ytree data into np arrays
+#                     node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
+#                     #write to h5 subgroups
+#                     sub_grp = grp.create_group(f"{group_name}_{root['Orig_halo_ID']}")
+#                     sub_grp.create_dataset('node_name', data=np.array(node_name, dtype='i8'))
+#                     sub_grp.create_dataset('node_order', data=np.array(node_order, dtype='i8'))
+#                     sub_grp.create_dataset('node_feats', data=np.concatenate(node_feats, axis=0))
+#                     sub_grp.create_dataset('edge_index', data=np.array(edges, dtype='i8'))
+#                     sub_grp.create_dataset('main_branch', data=np.array(main_branch, dtype='i8'))
 
 
-            except IOError:
-                print(f"fail to read LH {lh_id}")
-                continue
-    comm.Barrier()
+#             except IOError:
+#                 print(f"fail to read LH {lh_id}")
+#                 continue
+#     comm.Barrier()
 
-    if rank == 0:
-        # time
-        end = time.time()
-        duration = end - start
-        print(f"All halos saved to {fname_out}, used {duration:.4f}")        
+#     if rank == 0:
+#         # time
+#         end = time.time()
+#         duration = end - start
+#         print(f"All halos saved to {fname_out}, used {duration:.4f}")        
 
-def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
+def build_h5_fromytree_per_rank(root_logNpart_min, id_start=0, id_end=1000,
                                  all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
                                  file_name='tree_0_0_0.dat',
                                  label_path="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5",
                                  save_path='datasets/merger_trees_h5/',
-                                 save_name='full_data_rank'):
+                                 save_name='full_data_rank',
+                                 eps=1e-8):
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -222,17 +247,20 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
     with h5py.File(fname_out, 'w') as f:
         for lh_id, path in local_info:
             try:
-                tree_samples, tree_collection = read_subset_LH(path, root_mass_min)
+                tree_samples, tree_collection = read_subset_LH(path, root_logNpart_min)
                 group_name = f"LH_{lh_id}"
                 grp = f.create_group(group_name)
                 grp.create_dataset('y', data=y_dict[lh_id])
                 for root in tree_samples:
                     node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
+                    node_feats = np.concatenate(node_feats, axis=0)
+                    mpart = mass_particle(tree_collection.omega_matter) #
+                    node_feats[:,0] = node_feats[:,0] / (mpart+eps) #NEW: write off mass with Npart
 
                     sub_grp = grp.create_group(f"{group_name}_{root['Orig_halo_ID']}")
                     sub_grp.create_dataset('node_name', data=np.array(node_name, dtype='i8'))
                     sub_grp.create_dataset('node_order', data=np.array(node_order, dtype='i8'))
-                    sub_grp.create_dataset('node_feats', data=np.concatenate(node_feats, axis=0))
+                    sub_grp.create_dataset('node_feats', data=node_feats)
                     sub_grp.create_dataset('edge_index', data=np.array(edges, dtype='i8'))
                     sub_grp.create_dataset('main_branch', data=np.array(main_branch, dtype='i8'))
                 
@@ -247,9 +275,10 @@ def build_h5_fromytree_per_rank(root_mass_min, id_start=0, id_end=1000,
         duration = time.time() - start
         print(f"[Rank 0] Finished writing per-rank HDF5 files in {duration:.2f}")
 
-def merge_h5_rank_files(save_path, final_filename='merged_data.hdf5'):
+def merge_h5_rank_files(save_path, final_filename='merged_data.hdf5', 
+                        h5_file_names='full_data_rank_*.hdf5'):
     output_path = os.path.join(save_path, final_filename)
-    rank_files = sorted(glob.glob(os.path.join(save_path, 'full_data_rank_*.hdf5')))
+    rank_files = sorted(glob.glob(os.path.join(save_path, h5_file_names)))
 
     with h5py.File(output_path, 'w') as f_out:
         for rank_file in rank_files:
@@ -268,12 +297,13 @@ if __name__ == "__main__":
     parser.add_argument('--label_path', type=str, \
                         default="/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5", help='label dataset file')
     parser.add_argument('--save_path', type=pathlib.Path, \
-                        default='datasets/merger_trees_1000/', help='save tree dataset directory')
+                        default='datasets/merger_trees_1000_feat_npart/', help='save tree dataset directory')
     parser.add_argument('--save_name', type=str, default='full_data_rank', help='output h5 file name')
-    parser.add_argument('--mass_min', type=float, default=5e13, help='minimum mass of root halo (node); 5e13 for regular, 1e13 for large')
+    parser.add_argument('--logNpart_min', type=float, default=5.0, help='minimum log10 Nparticle=mass/mpart of root halo (node); 5.0 as default')
     parser.add_argument('--id_start', type=int, default=0, help='LH folder start id')
     parser.add_argument('--id_end', type=int, default=1000, help='LH folder end id')
     parser.add_argument('--post_merge', action="store_true", help='to merge processed files only')
+    parser.add_argument('--h5_name', type=str, default='full_data_rank_*.hdf5', help='saved h5 file name')
 
 
     args = parser.parse_args()
@@ -283,10 +313,10 @@ if __name__ == "__main__":
 
     # merge after writing
     if args.post_merge:
-        merge_h5_rank_files(args.save_path)
+        merge_h5_rank_files(args.save_path, h5_file_names=args.h5_name)
     # safe write
     else:
-        build_h5_fromytree_per_rank(args.mass_min, args.id_start, args.id_end, 
+        build_h5_fromytree_per_rank(args.logNpart_min, args.id_start, args.id_end, 
                         args.dataset_path, args.file_name, args.label_path,
                         args.save_path, args.save_name)
 
