@@ -454,9 +454,9 @@ def standardize_feature(X, mode='log', std_dim=[1], eps=1e-7):
         return (X - torch.mean(X, dim=0))/(torch.std(X, dim=0)+eps)
 
 
-def load_merged_h5_trees(h5_path, PyG_EXIST, prune_flag=False, max_trees=None, feat_idx=[0,1,2,3,4], 
+def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,1,2,3,4], 
                          normalize_mode='vmax_threshold',
-                         log_mass=True, node_feature_mode="cosmo",):
+                         log_mass=True, node_feature_mode="cosmo"):
     ''' 
     Load the merged h5 file created from merge_h5_rank_files
     Return:
@@ -519,7 +519,7 @@ def load_merged_h5_trees(h5_path, PyG_EXIST, prune_flag=False, max_trees=None, f
                 
                 ## return PyG if available
                 lh_halo_ids = tree_name.split("_")
-                if PyG_EXIST:
+                if PyG_EXISTS:
                     data = Data(
                         x=node_feats,
                         edge_index=edge_index,
