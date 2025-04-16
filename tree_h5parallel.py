@@ -250,7 +250,8 @@ def build_h5_fromytree_per_rank(mass_min, id_start=0, id_end=1000,
                 group_name = f"LH_{lh_id}"
                 grp = f.create_group(group_name)
                 grp.create_dataset('y', data=y_dict[lh_id])
-                print(f"started LH_{lh_id}, with {len(list(tree_samples))} tree_samples!")
+                print(f"started LH_{lh_id}")
+                lh_count = 0
                 for root in tree_samples:
                     node_name, node_order, node_feats, edges, main_branch = save_tree_data(root)
                     node_feats = np.concatenate(node_feats, axis=0)
@@ -262,8 +263,9 @@ def build_h5_fromytree_per_rank(mass_min, id_start=0, id_end=1000,
                     sub_grp.create_dataset('node_feats', data=node_feats)
                     sub_grp.create_dataset('edge_index', data=np.array(edges, dtype='i8'))
                     sub_grp.create_dataset('main_branch', data=np.array(main_branch, dtype='i8'))
+                    lh_count += 1
                 
-                print(f"processed LH_{lh_id}!")
+                print(f"processed LH_{lh_id}, with {lh_count} trees!")
 
             except IOError:
                 print(f"[Rank {rank}] Failed to read LH_{lh_id}")
