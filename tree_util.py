@@ -5,6 +5,7 @@ from torch.nn.functional import one_hot, threshold
 try:
     from torch_geometric.data import Data, DataLoader 
     from torch_geometric.utils import subgraph, degree
+    import torch_geometric.transforms as T
     PyG_EXISTS = True
 except ImportError:
     PyG_EXISTS = False
@@ -26,15 +27,89 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 
+
+def trim_tree(data, log_mass_node_threshold=math.log10(3e10)):
+    mass_mask = data.x[:,0] > log_mass_node_threshold
+    node_indices = mass_mask.nonzero().flatten()
+    subset_edge_index, subset_edge_attr = subgraph(node_indices, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=True)
+    subset_node_features = data.x[node_indices]
+    subset_data = Data(x=subset_node_features, 
+                    edge_index=subset_edge_index, 
+                    edge_attr=subset_edge_attr,
+                    y=data.y,
+                    lh_id=data.lh_id)
+    return subset_data
+
+def cut_tree(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(3e10), connected_flag=False):
+    trim_subset = [trim_tree(data, log_mass_node_threshold) for data in dataset]
+    sizes_original = np.array([data.x.shape[0] for data in dataset])
+    sizes_trim = np.array([data.x.shape[0] for data in trim_subset])
+    print(f"finish trimming: average original size = {sizes_original.mean():.4f}, average trim size = {sizes_trim.mean():.4f}")
+    if not connected_flag:
+        return trim_subset
+
+    else:
+    #step 3 select the largest component only, and retain the trees where the largest component contains the root node (i.e. time == 1)
+    #connected_trim_subset = [data for data in trim_subset if is_connected(data, directed=True)]
+        lc_transform =  T.LargestConnectedComponents()
+        lc_trim_subset = [lc_transform(data) for data in trim_subset]
+        root_lc_trim_subset = [data for data in lc_trim_subset if data.x[0,-1].item() == 1.0]
+        sizes_lc = np.array([data.x.shape[0] for data in root_lc_trim_subset])
+
+        print(f"finish selecting {len(root_lc_trim_subset)} trees! average connected component size = {sizes_lc.mean():.4f}")
+
+        return root_lc_trim_subset 
+
+# def cut_tree_Npart2Mass(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(3e10), connected_flag=False):
+#     ''' 
+#     DEPRECIATED
+#     '''
+#     #step 1
+#     ori_dataset = copy.deepcopy(dataset)
+#     subset = []
+#     for data in ori_dataset:
+#         #compute root mass
+#         y = data.y[0,0].item()
+#         log_mpart = mass_particle(y, log=True)
+#         log_Npart = data.x[0,0].item() #initial feature: log N
+#         log_root_mass = log_Npart + log_mpart #Npart * mpart  -> log10 N + log10 m
+#         #print(f"{log_root_mass:.4f}, {log_mpart:.4f}, {log_Npart:.4f}")
+#         if log_root_mass > log_mass_threshold:
+#             data.x[:,0] = data.x[:,0] + log_mpart 
+#             subset.append(data) #recompute original mass (log)
+#     print(f"finish subsetting, returning a subset of {len(subset)} trees out of the ful set {len(ori_dataset)}!")
+    
+#     #step 2
+#     trim_subset = [trim_tree(data, log_mass_node_threshold) for data in subset]
+#     sizes_original = np.array([data.x.shape[0] for data in subset])
+#     sizes_trim = np.array([data.x.shape[0] for data in trim_subset])
+#     print(f"finish trimming: average original size = {sizes_original.mean():.4f}, average trim size = {sizes_trim.mean():.4f}")
+#     if not connected_flag:
+#         return trim_subset
+
+#     else:
+#     #step 3 select the largest component only, and retain the trees where the largest component contains the root node (i.e. time == 1)
+#     #connected_trim_subset = [data for data in trim_subset if is_connected(data, directed=True)]
+#         lc_transform =  T.LargestConnectedComponents()
+#         lc_trim_subset = [lc_transform(data) for data in trim_subset]
+#         root_lc_trim_subset = [data for data in lc_trim_subset if data.x[0,-1].item() == 1.0]
+#         sizes_lc = np.array([data.x.shape[0] for data in root_lc_trim_subset])
+
+#         print(f"finish selecting {len(root_lc_trim_subset)} trees! average connected component size = {sizes_lc.mean():.4f}")
+
+#         return root_lc_trim_subset 
+
+
+
 def find_leaf_nodes(data: Data):
     """ 
     Return the leaf nodes from data (torch_geometric.data.Data): The graph data object.
     """
     edge_index = data.edge_index  # shape [2, num_edges]
-    num_nodes = data.num_nodes
+    num_nodes = data.x.shape[0]
 
-    # Nodes with outgoing edges (appear in source/index 0)
-    src_nodes = edge_index[0]
+    # Nodes with incomings edges (appear in source/index 0) (ancestor -> target)
+    src_nodes = edge_index[1]
     all_nodes = torch.arange(num_nodes)
 
     # Leaf nodes = nodes not in source list
@@ -105,54 +180,59 @@ def prune_linear_nodes(data: Data) -> Data:
 
     # Create new Data object
     data_pruned = Data(x=x_new, edge_index=edge_index_new, edge_attr=edge_attr,
-                        num_nodes=len(kept_nodes), pos=pos_new, y=data.y)
+                        num_nodes=len(kept_nodes), pos=pos_new, y=data.y, lh_id=data.lh_id)
 
     return data_pruned
 
-def get_subset(data, mode='prune', leaf_threshold=math.log10(3e9)):
+def get_subset(data, mode='prune', log_mass_node_threshold=math.log10(3e10)):
     """
     Creates a subset tree (subgraph) based on given node feature (mass) threshold
 
     Args:
         data (torch_geometric.data.Data): The graph data object.
-        mode: choices in ['subtree', 'root', 'leaf'] where
-        - 'subtree': get a subtree with node mass > leaf_threshold
-        - 'root': retain only the root node
-        - 'leaf': retain only the leaf node
+        mode: choices in ['prune, 'trim', 'leaves', 'main_branch'] where
         - 'prune': prune tree to coarsen linear paths
+        - 'leaves': retain only the leaf nodes
+        - 'main_branch': retian only the main branch
 
     Returns:
         torch_geometric.data.Data: The subgraph (remapped nodes and edges)
     """
     if mode == 'prune':
         return prune_linear_nodes(data)
-
     else:
-        if mode == 'subtree':
-            node_indices = torch.where(data.x[:,0] > leaf_threshold)[0]
-            subset_edge_index, subset_edge_attr = subgraph(node_indices, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=True)
-            
-            subset_node_features = data.x[node_indices]
-            
-            subset_data = Data(x=subset_node_features, 
-                            edge_index=subset_edge_index, 
-                            edge_attr=subset_edge_attr,
-                            y=data.y)
-            subset_leaf_idx = find_leaf_nodes(subset_data)
-            subset_data['leaf_idx'] = subset_leaf_idx
-
-        else:
-            subset_data = copy.deepcopy(data)
-            subset_data['edge_index'] = None
-            subset_data['pos'] = None
-            if mode == 'root':
-                subset_data['x'] = subset_data['x'][0, :].unsqueeze(0)
-            elif mode == 'leaf':
-                subset_data['x'] = subset_data['x'][-1, :].unsqueeze(0)
-            else:
-                raise NotImplementedError
+        if mode == 'leaves':
+            node_indices = find_leaf_nodes(data) #disconnected leaf components
     
+        elif mode == 'main_branch':
+            mask = torch.isin(data.node_halo_id, torch.LongTensor(data.mask_main)) #NOTE: a halo id may appear > 1 if the halo splits
+            node_indices = torch.nonzero(mask).flatten()
+        # node_indices = torch.where(data.x[:,0] > leaf_threshold)[0]
+        subset_edge_index, subset_edge_attr = subgraph(node_indices, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=True)
+        
+        subset_node_features = data.x[node_indices]
+        
+        subset_data = Data(x=subset_node_features, 
+                        edge_index=subset_edge_index, 
+                        edge_attr=subset_edge_attr,
+                        y=data.y,
+                        lh_id=data.lh_id)
         return subset_data
+   
+            # subset_leaf_idx = find_leaf_nodes(subset_data)
+            # subset_data['leaf_idx'] = subset_leaf_idx
+
+        # else:
+        #     subset_data = copy.deepcopy(data)
+        #     subset_data['edge_index'] = None
+        #     subset_data['pos'] = None
+        #     if mode == 'root':
+        #         subset_data['x'] = subset_data['x'][0, :].unsqueeze(0)
+        #     elif mode == 'leaf':
+        #         subset_data['x'] = subset_data['x'][-1, :].unsqueeze(0)
+        #     else:
+        #         raise NotImplementedError
+    
 
 def select_tree_per_LH(sample_lh, lh_id, train_n_sample=-1, seed=0):
     random.seed(seed)
@@ -163,8 +243,14 @@ def select_tree_per_LH(sample_lh, lh_id, train_n_sample=-1, seed=0):
         rand_idx = np.where(sample_lh == lh_id)[0]
     return rand_idx
 
+def normalize_data_all(data_list, mean, std, eps=1e-8):
+    for data in data_list:
+        data.x = (data.x - mean)/std 
+    return data_list
+
+
 def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, val_ratio=0.2, seed=0, 
-                     train_n_sample=1):
+                     train_n_sample=1, normalize=True, eps=1e-8):
     ''' 
     60/20/20 train/val/test split based on disjoint cosmo (note: y cosmo is arranged in random order!)
     '''
@@ -194,6 +280,13 @@ def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, val
     dataset_train = [dataset[i] for i in idx_train]
     dataset_val = [dataset[i] for i in idx_val]
     dataset_test =  [dataset[i] for i in idx_test]
+    if normalize:
+        print(f"normalizing for mean 0 , std 1 across all trees!")
+        all_train_x = torch.cat([data.x for data in dataset_train], dim=0)
+        mean_x, std_x = all_train_x.mean(dim=0), all_train_x.std(dim=0)
+        dataset_train = normalize_data_all(dataset_train, mean_x, std_x)
+        dataset_val = normalize_data_all(dataset_val, mean_x, std_x)
+        dataset_test = normalize_data_all(dataset_test, mean_x, std_x)
 
     print(f'train_size={len(dataset_train)}, val_size={len(dataset_val)}, test_size={len(dataset_test)}')
     print(f'sampled train data view = {dataset_train[0]}')
@@ -239,65 +332,6 @@ def split_dataset_corr(dataset, seed=0, cut=5, train_n_sample=4, eval_n_sample=1
 
 
 ###Helper function that generate the tree data / PyG format from ytree (outdated, replaced by tree_h5parallel.py)
-
-def compute_concentration(halo):
-    return halo["Rvir"] / halo["rs"]
-
-def extract_node_feat(node):
-    ''' 
-    x, y, z: position, Mpc/h
-    vx, vy, vz: velocity, km/s
-    Mvir: mass, Msun/h
-    concentration: 
-    '''
-    concentration = compute_concentration(node)
-    feat_np = np.hstack([node['Mvir'].value, concentration.value,
-            node['x'].value, node['y'].value, node['z'].value, 
-            node['vx'].value, node['vy'].value, node['vz'].value])
-    return torch.from_numpy(feat_np).unsqueeze(0).float()
-
-def traverse_tree(halo, height, node_id_map=None, edge_index=None, node_order=None, node_feat=None, counter=None):
-    """
-    Recursively traverse tree and assign unique node IDs using a shared counter (start with counter=[0]).
-    """
-    if edge_index is None:
-        edge_index = []
-        node_order = []
-        node_feat = []
-        node_id_map = {}
-        counter = [0]  # mutable counter shared across recursion
-
-    node_key = halo['Orig_halo_ID']
-    if node_key in node_id_map:
-        return  # already visited
-    curr_id = counter[0]
-    node_id_map[node_key] = curr_id
-    counter[0] += 1
-
-    node_order.append(height)
-    node_feat.append(extract_node_feat(halo))
-
-    ancestors = list(halo.ancestors)
-    if ancestors is None:
-        return
-
-    for anc in ancestors:
-        anc_key = anc['Orig_halo_ID']
-        traverse_tree(anc, height + 1, node_id_map, edge_index, node_order, node_feat, counter)
-        anc_id = node_id_map[anc_key]
-        edge_index.append((anc_id, curr_id))  # edge: ancestor → current
-
-    return list(node_id_map.values()), list(node_id_map.keys()), node_order, node_feat, edge_index
-
-
-def save_tree_data(halo):
-    #traverse the tree
-    node_id, node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
-    #export the main branch
-    main_branch = list(halo["prog", "Orig_halo_ID"])
-    #mask_main_branch = [node in main_branch for node in node_name]
-    return node_id, node_name, node_order, node_feats, edges, main_branch
-
 
 def construct_PyG_data(node_name, node_order, node_feats, edges, main_branch):
     #traverse the tree
@@ -433,30 +467,24 @@ def build_PyGdata_fromytree(root_mass_min, root_mass_max, n_samples, id_start=0,
 
 #     return data_list
 
-def mass_particle(omega_m):
+def mass_particle(omega_m, log=False):
     ''' 
     compute particle mass as a function of omega_m
     '''
     rho_crit = 277.53663
     L = 100e3
     nres = 640
-    return L**3 * omega_m * rho_crit / nres**3
-
-def standardize_feature(X, mode='log', std_dim=[1], eps=1e-7):
-    ''' 
-    Given input tensor (bs, d), noramlize per mode
-    - mode == 'log': hstack(X[:,~std_dim], log10(X[:,std_dim]) (log norm vmax, keep concentration)
-    - mode == 'standard': normalize to mean 0, std 1 per feature column
-    '''
-    if mode == 'log':
-        return torch.hstack((X[:,:1], torch.log(X[:,1:])+eps))
+    out = L**3 * omega_m * rho_crit / nres**3
+    if log:
+        return math.log10(out)
     else:
-        return (X - torch.mean(X, dim=0))/(torch.std(X, dim=0)+eps)
+        return out
 
 
-def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,1,2,3,4], 
+def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,1,2], 
                          normalize_mode='vmax_threshold',
-                         log_mass=True, node_feature_mode="cosmo"):
+                         log_flag=True, node_feature_mode="cosmo",
+                         subset_mode="full"):
     ''' 
     Load the merged h5 file created from merge_h5_rank_files
     Return:
@@ -477,12 +505,18 @@ def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,
       8-10 - vx, vy, vz velocity
       11-13 - Jx, Jy, Jz actions
     - param normalize_mode: normalize features
-    - param log_mass: log10 of Mass/Mpart
+    - param log_flag: log10 of features
     - param node_feature_mode: 
       "cosmo": using cosmological features from feat_idx above
       "random": random Gaussian features (investigate the role of tree topology)
       "constant": constant all-ones features (investigate the role of tree topology)
+    - param subset_mode:
+      "full": use the whole tree
+      "main_branch": use the main branch (path) only
+      "leaves": use the leaves only
     '''
+    if subset_mode != "full":
+        assert PyG_EXISTS, "must have pytorch geometric installed to subset trees!"
     data_list = []
     with h5py.File(h5_path, 'r') as f:
         for lh_group_name in f.keys():  # e.g. 'LH_0', 'LH_1', ...
@@ -501,13 +535,15 @@ def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,
                 
                 if node_feature_mode == 'cosmo':
                     node_feats = torch.tensor(tree_group['node_feats'][()]).float()
-                    if normalize_mode == 'vmax_threshold': #truncate vmax by thresholding at vmax=20
-                        node_feats[:,2] = threshold(node_feats[:,2], threshold=20, value=0) 
-                    else:
-                        pass
-                    if log_mass: #normalize by log
-                        node_feats[:,0] = torch.log10(node_feats[:,0])
+                    # if normalize_mode == 'vmax_threshold': #truncate vmax by thresholding at vmax=20
+                    #     node_feats[:,2] = threshold(node_feats[:,2], threshold=20, value=0) 
+                    # else:
+                    #     pass
+                    # if log_flag: #normalize by log -> apply it to all features [0-4]
+                    #     node_feats[:,0] = torch.log10(node_feats[:,0])
                     node_feats = node_feats[:, feat_idx]
+                    if log_flag:
+                        node_feats = torch.log10(node_feats)
                     #node_feats = standardize_feature(node_feats[:, feat_idx], mode='std') #subset feature dimension (mass, concen, x, y, z, vx, vy, vz)
                     #node_feats = standardize_feature(node_feats, mode='log', std_dim=[1]) #TODO: all normalizations are worse than unnormalizaed...
                 elif node_feature_mode == 'random':
@@ -521,7 +557,7 @@ def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,
                 lh_halo_ids = tree_name.split("_")
                 if PyG_EXISTS:
                     data = Data(
-                        x=node_feats,
+                        x=node_feats, #(log mass, log concen, log vmax, ...)
                         edge_index=edge_index,
                         pos=node_order,  # DFS depth order as node position
                         y=y,              # cosmology label
@@ -535,8 +571,12 @@ def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,
                         main_branch = tree_group['main_branch'][()]
                         data.mask_main = main_branch #mask if the node is on the main branch
 
-                    data.root_halo_id = int(lh_halo_ids[-1])  # add halo ID attribute
+                    data.root_halo_id = int(lh_halo_ids[-1])  # add halo ID attribute -> corresponding to uid in ytree
                     data.lh_id = int(lh_halo_ids[1]) # also store LH simulation ID
+                    #subsetting
+                    if subset_mode != "full":
+                        data = get_subset(data, mode=subset_mode)
+
                 else:
                     data = {"x": node_feats,
                             "edge_index": edge_index,
