@@ -224,7 +224,7 @@ def eval_model(model, eval_loader,
     
 
 def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
-                model_name, target_id, fig_path, s=5, sigma8=False):
+                model_name, target_id, fig_path, s=5):
     plt.scatter(train_target, train_pred, s=s, label='training', color='tab:blue', alpha=0.6)
     plt.scatter(val_target, val_pred, s=s, label="validation", color='tab:orange', alpha=0.6)
     plt.axline((0, 0), slope=1, color='gray', linestyle=':', label='y=x')
@@ -235,7 +235,8 @@ def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_
         plt.ylim(0.6,1.0)
     plt.xlabel(f"target {target_name}")
     plt.ylabel(f"predicted {target_name}")
-    plt.title(f"{model_name} \n train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+    model_name_list = model_name.split("_")
+    plt.title(f"{model_name_list[0]}: depth={model_name_list[2]},  \n target={target_name}, train_size={len(train_target)}, train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
     if fig_path is not None:
         plt.savefig(fig_path, dpi=150)
 
