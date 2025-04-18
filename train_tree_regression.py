@@ -11,7 +11,7 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
-from tree_util import load_merged_h5_trees, split_dataloader, split_dataset_corr, cut_tree
+from tree_util import load_merged_h5_trees, split_dataloader, dataset_to_dataloader
 from model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, eval_and_plot, plot_train_val_loss
 import argparse
 import pathlib
@@ -28,12 +28,18 @@ def plot_data_check(data, save_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=pathlib.Path, \
-                        default="datasets/merger_trees_1000_feat_npart_cut5/merged_data.hdf5", help='data path')
+    # parser.add_argument('--data_path', type=pathlib.Path, \
+    #                     default="datasets/merger_trees_1000_feat_1e13/merged_data.hdf5", help='data path')
+    parser.add_argument('--trainset_path', type=pathlib.Path, \
+                        default='trim_tree_regression/pruned_trimmed_trainset_n=3_lh=600.pkl', help='training data path')
+    parser.add_argument('--valset_path', type=pathlib.Path, \
+                        default='trim_tree_regression/pruned_trimmed_valset_n=3_lh=200.pkl', help='validation data path')
+    
     parser.add_argument('--save_path', type=pathlib.Path, \
                         default='tree_regression', help='model checkpoint dir')
+
     parser.add_argument('--model_type', type=str, default='MPNN', 
-                        choices=['MPNN', 'TreeMP', 'MLPAgg', "DeepSet"], help='model type')
+                        choices=['MPNN', 'MLPAgg', "DeepSet"], help='model type')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
     parser.add_argument('--target_id', type=int, default=0, help='0: omega_m; 1: sigma_8')
     parser.add_argument('--hid_dim', type=int, default=16, help='hidden dim')
@@ -58,46 +64,48 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    if args.prune_flag:
-        dataset = load_merged_h5_trees("datasets/prune_merger_trees_1000_feat_npart_cut5/merged_data.hdf5",
-                                       prune_flag=True,
-                                       normalize_mode=args.normalize_mode, feat_idx=args.feat_idx,
-                                       log_flag=True,
-                                       node_feature_mode=args.node_feature_mode,
-                                       subset_mode=args.subset_mode
-                                       )
-    else:
-        dataset = load_merged_h5_trees(args.data_path, normalize_mode=args.normalize_mode, 
-                                   feat_idx=args.feat_idx, log_flag=True,
-                                   node_feature_mode=args.node_feature_mode,
-                                   subset_mode=args.subset_mode)
+    # if args.prune_flag:
+    #     dataset = load_merged_h5_trees("datasets/prune_merger_trees_1000_feat_npart_cut5/merged_data.hdf5",
+    #                                    prune_flag=True,
+    #                                    normalize_mode=args.normalize_mode, feat_idx=args.feat_idx,
+    #                                    log_flag=True,
+    #                                    node_feature_mode=args.node_feature_mode,
+    #                                    subset_mode=args.subset_mode
+    #                                    )
+    # else:
+    #     dataset = load_merged_h5_trees(args.data_path, normalize_mode=args.normalize_mode, 
+    #                                feat_idx=args.feat_idx, log_flag=True,
+    #                                node_feature_mode=args.node_feature_mode,
+    #                                subset_mode=args.subset_mode)
     
-    if args.trim_mass:
-        print(f"cutting trees...")
-        dataset = cut_tree(dataset, log_mass_node_threshold=args.log_mass_threshold)
+    # if args.trim_mass:
+    #     print(f"cutting trees...")
+    #     dataset = cut_tree(dataset, log_mass_node_threshold=args.log_mass_threshold)
         
-    print(len(dataset))       # Total number of trees
-    print(dataset[0].x.shape)
+    # print(len(dataset))       # Total number of trees
+    # print(dataset[0].x.shape)
 
-    #leaf_threshold = math.log10(args.leaf_threshold) if args.log_flag else args.leaf_threshold
-    train_loader, val_loader, test_loader = split_dataloader(dataset, args.batch_size, 
-                                                             train_n_sample=args.train_n_sample,
-                                                             normalize=True)
+    # #leaf_threshold = math.log10(args.leaf_threshold) if args.log_flag else args.leaf_threshold
+    # train_loader, val_loader, test_loader = split_dataloader(dataset, args.batch_size, 
+    #                                                          train_n_sample=args.train_n_sample,
+    #                                                          normalize=True)
+    trainset = pickle.load(open(args.trainset_path, "rb"))
+    valset = pickle.load(open(args.valset_path, "rb"))
+    train_loader, val_loader, _ = dataset_to_dataloader(trainset, valset, batch_size=args.batch_size,
+                                                         normalize=True)
+    #prune_trim_testset = 
     batch = next(iter(train_loader))
     print(batch.x[:10])
 
-    if args.feat_idx is None: #random feat/ const. feat ->TODO: higher-dim random feat?
-        node_dim = 1
-    else:
-        node_dim = len(args.feat_idx)
+    node_dim = batch.x.shape[1]
     out_dim = 1
     
     mlp_only = False
     if args.model_type == 'MPNN':
     #model = TreeGINConv(node_dim,hid_dim, out_dim)
         model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=0 )
-    elif args.model_type == 'TreeMP':
-        model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=30)
+    # elif args.model_type == 'TreeMP':
+    #     model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=30)
     elif args.model_type == 'MLPAgg':
         model = MLPAgg(node_dim, args.hid_dim, out_dim)
         mlp_only = True
@@ -116,7 +124,8 @@ if __name__ == "__main__":
                 f"_bs={args.batch_size}_n={args.train_n_sample}"
                 f"_feat={args.node_feature_mode}_masscut={args.log_mass_threshold}")
                
-    save_dir = f"trim_{args.save_path}/{model_name}" if args.trim_mass else f"{args.subset_mode}_{args.save_path}/{model_name}"
+    #save_dir = f"trim_{args.save_path}/{model_name}" if args.trim_mass else f"{args.subset_mode}_{args.save_path}/{model_name}"
+    save_dir = f"trim_{args.save_path}/{args.subset_mode}/{model_name}" 
     os.makedirs(save_dir, exist_ok=True)
     plot_data_check(next(iter(train_loader)), f"{save_dir}/feat_check.png")
 

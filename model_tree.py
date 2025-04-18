@@ -10,6 +10,7 @@ import pickle
 import matplotlib.pyplot as plt
 import copy
 from torch.nn.functional import one_hot
+from torch_geometric.nn.aggr import DeepSetsAggregation
 
 
 class TreeGINConv(MessagePassing):
@@ -70,19 +71,48 @@ class TreeRegressor(nn.Module):
         return tree_pred
 
 class MLPAgg(nn.Module):
-    def __init__(self, node_dim, hid_dim, out_dim):
+    def __init__(self, node_dim, hid_dim, out_dim, agg_first=True):
         super(MLPAgg, self).__init__()
         self.regressor =Seq(Lin(node_dim, hid_dim), 
                               ReLU(), 
                               Lin(hid_dim, hid_dim),
                               ReLU(),
                               Lin(hid_dim, out_dim)) #Lin(hid_dim, out_dim)
+        self.agg_first = agg_first
     
     def forward(self, x, x_batch):
-        node_out = self.regressor(x) 
-        tree_pred = scatter_mean(node_out, x_batch, dim=0)
+        if self.agg_first:
+            x_agg = scatter_mean(x, x_batch, dim=0)
+            tree_pred = self.regressor(x_agg)
+        else:
+            node_out = self.regressor(x) 
+            tree_pred = scatter_mean(node_out, x_batch, dim=0)
         return tree_pred
-    
+
+class DeepSet(nn.Module):
+    def __init__(self, node_dim, hid_dim, out_dim, reduce='mean'):
+        super(DeepSet, self).__init__()
+        self.local_phi = Seq(Lin(node_dim, hid_dim), 
+                        ReLU(), 
+                        Lin(hid_dim, hid_dim),
+                        )
+        self.global_rho = Seq(Lin(hid_dim, hid_dim), 
+                        ReLU(), 
+                        Lin(hid_dim, out_dim),
+                        )
+        self.reduce = reduce
+        #self.deepset = DeepSetsAggregation(local_nn=phi, global_nn=rho) #sum agg
+    def forward(self, x, x_batch):
+        if self.reduce == 'mean':
+            hid = scatter_mean(self.local_phi(x), x_batch, dim=0)
+        else:
+            hid = scatter_sum(self.local_phi(x), x_batch, dim=0)
+        out = self.global_rho(hid)
+        #out = self.deepset(x, x_batch) 
+
+        return out
+
+
 def train_eval_model(model, train_loader, val_loader, 
                      mlp_only=False, n_epochs=100, lr=1e-2, 
                      eval_every=1,
@@ -109,7 +139,8 @@ def train_eval_model(model, train_loader, val_loader,
     
 def train_model(model, train_loader, optimizer,
                 mlp_only, target_id, 
-                criterion=nn.L1Loss(reduction='mean')):
+                criterion=nn.MSELoss()):
+                #criterion=nn.L1Loss(reduction='mean')):
     model.train()
     loss_hist = []
     device = next(model.parameters()).device
@@ -134,7 +165,8 @@ def train_model(model, train_loader, optimizer,
 
 def eval_model(model, eval_loader, 
                mlp_only, target_id, 
-               criterion=nn.L1Loss(reduction='sum')):
+               criterion=nn.MSELoss(reduction='sum')):
+               #criterion=nn.L1Loss(reduction='sum')):
     ##eval - assume full batch
     model.eval()
     device = next(model.parameters()).device
@@ -192,12 +224,15 @@ def eval_model(model, eval_loader,
     
 
 def plot_result(train_target, train_pred, train_loss, val_target, val_pred, val_loss,
-                model_name, target_id, fig_path, s=5):
+                model_name, target_id, fig_path, s=5, sigma8=False):
     plt.scatter(train_target, train_pred, s=s, label='training', color='tab:blue', alpha=0.6)
     plt.scatter(val_target, val_pred, s=s, label="validation", color='tab:orange', alpha=0.6)
     plt.axline((0, 0), slope=1, color='gray', linestyle=':', label='y=x')
     plt.legend()
     target_name = r"$\Omega_m$" if target_id == 0 else r"$\sigma_8$"
+    if target_id == 1:
+        plt.xlim(0.6,1.0)
+        plt.ylim(0.6,1.0)
     plt.xlabel(f"target {target_name}")
     plt.ylabel(f"predicted {target_name}")
     plt.title(f"{model_name} \n train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")

@@ -19,6 +19,8 @@ import h5py
 from itertools import compress
 import copy 
 import math
+from collections import defaultdict
+import pickle
 
 seed = 999
 random.seed(seed)
@@ -27,61 +29,82 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 
+def trim_tree_subtree_mass_check(data: Data, threshold: float) -> Data:
+    edge_index = data.edge_index
+    mass = data.x[:, 0]
 
-def trim_tree(data, log_mass_node_threshold=math.log10(3e10)):
-    mass_mask = data.x[:,0] > log_mass_node_threshold
-    node_indices = mass_mask.nonzero().flatten()
+    # Build parent ➝ [children] map
+    parent_to_children = defaultdict(list)
+    for child, parent in edge_index.t().tolist():
+        parent_to_children[parent].append(child)
+
+    root = 0
+    keep_nodes = set()
+
+    def dfs(node):
+        """Returns True if this subtree has any node with mass >= threshold"""
+        subtree_has_high_mass = mass[node] >= threshold
+
+        for child in parent_to_children.get(node, []):
+            child_has_high_mass = dfs(child)
+            subtree_has_high_mass |= child_has_high_mass
+
+        if subtree_has_high_mass:
+            keep_nodes.add(node)
+
+        return subtree_has_high_mass
+
+    dfs(root)
+
+    # Map old ➝ new indices
+    keep_nodes = sorted(list(keep_nodes))
+    return keep_nodes
+
+def trim_tree(data, log_mass_node_threshold=math.log10(3e10), connect_trim=True):
+    if connect_trim: #Richard's approach
+        node_indices = trim_tree_subtree_mass_check(data, log_mass_node_threshold)
+    else:
+        mass_mask = data.x[:,0] > log_mass_node_threshold
+        node_indices = mass_mask.nonzero().flatten()
     subset_edge_index, subset_edge_attr = subgraph(node_indices, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=True)
     subset_node_features = data.x[node_indices]
+    subset_halo_id = data.node_halo_id[node_indices]
     subset_data = Data(x=subset_node_features, 
                     edge_index=subset_edge_index, 
                     edge_attr=subset_edge_attr,
                     y=data.y,
-                    lh_id=data.lh_id)
+                    lh_id=data.lh_id,
+                    mask_main=data.mask_main, 
+                    node_halo_id = subset_halo_id)
     return subset_data
 
-def cut_tree(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(3e10), connected_flag=False):
-    trim_subset = [trim_tree(data, log_mass_node_threshold) for data in dataset]
-    sizes_original = np.array([data.x.shape[0] for data in dataset])
-    sizes_trim = np.array([data.x.shape[0] for data in trim_subset])
-    print(f"finish trimming: average original size = {sizes_original.mean():.4f}, average trim size = {sizes_trim.mean():.4f}")
-    if not connected_flag:
-        return trim_subset
+# # Toy test case to validate trim_tree
+# #  Edge list: child ➝ parent
+# edges = [
+#     (1, 0),
+#     (2, 0),
+#     (3, 1),
+#     (4, 1)
+# ]
+# edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
 
-    else:
-    #step 3 select the largest component only, and retain the trees where the largest component contains the root node (i.e. time == 1)
-    #connected_trim_subset = [data for data in trim_subset if is_connected(data, directed=True)]
-        lc_transform =  T.LargestConnectedComponents()
-        lc_trim_subset = [lc_transform(data) for data in trim_subset]
-        root_lc_trim_subset = [data for data in lc_trim_subset if data.x[0,-1].item() == 1.0]
-        sizes_lc = np.array([data.x.shape[0] for data in root_lc_trim_subset])
+# # Node features: [mass]
+# x = torch.tensor([
+#     [2.0],  # Node 0
+#     [2.0],  # Node 1
+#     [5.0],  # Node 2
+#     [1.0],  # Node 3
+#     [1.0],  # Node 4
+# ], dtype=torch.float)
 
-        print(f"finish selecting {len(root_lc_trim_subset)} trees! average connected component size = {sizes_lc.mean():.4f}")
+# test_data = Data(x=x, edge_index=edge_index)
+# test_data.lh_id = 0
+# trim_test_data = trim_tree(test_data, 3.0, connect_trim=True)
+# trim_test_data.x
 
-        return root_lc_trim_subset 
-
-# def cut_tree_Npart2Mass(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(3e10), connected_flag=False):
-#     ''' 
-#     DEPRECIATED
-#     '''
-#     #step 1
-#     ori_dataset = copy.deepcopy(dataset)
-#     subset = []
-#     for data in ori_dataset:
-#         #compute root mass
-#         y = data.y[0,0].item()
-#         log_mpart = mass_particle(y, log=True)
-#         log_Npart = data.x[0,0].item() #initial feature: log N
-#         log_root_mass = log_Npart + log_mpart #Npart * mpart  -> log10 N + log10 m
-#         #print(f"{log_root_mass:.4f}, {log_mpart:.4f}, {log_Npart:.4f}")
-#         if log_root_mass > log_mass_threshold:
-#             data.x[:,0] = data.x[:,0] + log_mpart 
-#             subset.append(data) #recompute original mass (log)
-#     print(f"finish subsetting, returning a subset of {len(subset)} trees out of the ful set {len(ori_dataset)}!")
-    
-#     #step 2
-#     trim_subset = [trim_tree(data, log_mass_node_threshold) for data in subset]
-#     sizes_original = np.array([data.x.shape[0] for data in subset])
+# def cut_tree(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(3e10), connected_flag=False):
+#     trim_subset = [trim_tree(data, log_mass_node_threshold) for data in dataset]
+#     sizes_original = np.array([data.x.shape[0] for data in dataset])
 #     sizes_trim = np.array([data.x.shape[0] for data in trim_subset])
 #     print(f"finish trimming: average original size = {sizes_original.mean():.4f}, average trim size = {sizes_trim.mean():.4f}")
 #     if not connected_flag:
@@ -98,7 +121,6 @@ def cut_tree(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(
 #         print(f"finish selecting {len(root_lc_trim_subset)} trees! average connected component size = {sizes_lc.mean():.4f}")
 
 #         return root_lc_trim_subset 
-
 
 
 def find_leaf_nodes(data: Data):
@@ -118,7 +140,7 @@ def find_leaf_nodes(data: Data):
 
     return leaf_nodes
 
-def prune_linear_nodes(data: Data) -> Data:
+def prune_linear_nodes(data: Data, use_threshold=False, threshold = math.log10(3e10)) -> Data:
     edge_index = data.edge_index
     num_nodes = data.x.shape[0]
 
@@ -131,6 +153,8 @@ def prune_linear_nodes(data: Data) -> Data:
     # Step 2: Identify nodes with exactly one parent and one child
     # These are linear, "pass-through" nodes we want to prune
     linear_nodes_mask = (in_degree == 1) & (out_degree == 1)
+    if use_threshold:
+        linear_nodes_mask = linear_nodes_mask & (data.x[:,0] < threshold)
     linear_nodes = linear_nodes_mask.nonzero(as_tuple=False).flatten().tolist()
 
     # Step 3: Build mapping from child -> parent (edge direction)
@@ -176,11 +200,14 @@ def prune_linear_nodes(data: Data) -> Data:
 
     # Remap node features if present
     x_new = data.x[kept_nodes] 
-    pos_new = data.pos[kept_nodes]
+    #pos_new = data.pos[kept_nodes]
+    subset_halo_id = data.node_halo_id[kept_nodes]
 
     # Create new Data object
     data_pruned = Data(x=x_new, edge_index=edge_index_new, edge_attr=edge_attr,
-                        num_nodes=len(kept_nodes), pos=pos_new, y=data.y, lh_id=data.lh_id)
+                        num_nodes=len(kept_nodes), y=data.y, lh_id=data.lh_id,
+                        mask_main=data.mask_main, 
+                        node_halo_id = subset_halo_id)
 
     return data_pruned
 
@@ -205,7 +232,7 @@ def get_subset(data, mode='prune', log_mass_node_threshold=math.log10(3e10)):
             node_indices = find_leaf_nodes(data) #disconnected leaf components
     
         elif mode == 'main_branch':
-            mask = torch.isin(data.node_halo_id, torch.LongTensor(data.mask_main)) #NOTE: a halo id may appear > 1 if the halo splits
+            mask = torch.isin(data.node_halo_id.flatten(), torch.LongTensor(data.mask_main)) #NOTE: a halo id may appear > 1 if the halo splits
             node_indices = torch.nonzero(mask).flatten()
         # node_indices = torch.where(data.x[:,0] > leaf_threshold)[0]
         subset_edge_index, subset_edge_attr = subgraph(node_indices, data.edge_index, edge_attr=data.edge_attr, relabel_nodes=True)
@@ -247,6 +274,31 @@ def normalize_data_all(data_list, mean, std, eps=1e-8):
     for data in data_list:
         data.x = (data.x - mean)/std 
     return data_list
+
+def dataset_to_dataloader(dataset_train, dataset_val, dataset_test=None, 
+                          batch_size=128, shuffle=True, normalize=True):
+    ''' 
+    given pre-splitted datasets (train/val/test), construct dataloaders with optional preprocessing
+    '''
+    if normalize:
+        print(f"normalizing for mean 0 , std 1 across all trees!")
+        all_train_x = torch.cat([data.x for data in dataset_train], dim=0)
+        mean_x, std_x = all_train_x.mean(dim=0), all_train_x.std(dim=0)
+        dataset_train = normalize_data_all(dataset_train, mean_x, std_x)
+        dataset_val = normalize_data_all(dataset_val, mean_x, std_x)
+        if dataset_test is not None:
+            dataset_test = normalize_data_all(dataset_test, mean_x, std_x)
+    test_size = len(dataset_test) if dataset_test is not None else 0
+
+    print(f'train_size={len(dataset_train)}, val_size={len(dataset_val)}, test_size={test_size}')
+    print(f'sampled train data view = {dataset_train[0]}')
+    train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle, follow_batch=['x'])
+    val_loader = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+    if dataset_test is not None:
+        test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+        return train_loader, val_loader, test_loader
+    else:
+        return train_loader, val_loader, None
 
 
 def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, val_ratio=0.2, seed=0, 
@@ -329,143 +381,6 @@ def split_dataset_corr(dataset, seed=0, cut=5, train_n_sample=4, eval_n_sample=1
     print(f"trainset size = {len(dataset_train)}, eval_in size = {len(dataset_eval_in)}, eval_out size = {len(dataset_eval_out)}")
     return dataset_train, dataset_eval_in, dataset_eval_out
 
-
-
-###Helper function that generate the tree data / PyG format from ytree (outdated, replaced by tree_h5parallel.py)
-
-def construct_PyG_data(node_name, node_order, node_feats, edges, main_branch):
-    #traverse the tree
-    # node_name, node_order, node_feats, edges = traverse_tree(halo, 0)
-    #export the main branch
-    mask_main_branch = torch.tensor([node in main_branch for node in node_name], dtype=bool).unsqueeze(1)
-    #map node names to indices
-    node_to_index = {name: index for index, name in enumerate(node_name)}
-    edge_list = [(node_to_index[source], node_to_index[target]) for source, target in edges]
-    edge_index = torch.tensor(edge_list, dtype=torch.long).T.contiguous()
-    # Create PyTorch Geometric Data object
-    data = Data(x=torch.cat(node_feats, dim=0),
-                edge_index=edge_index, pos=torch.LongTensor(node_order).unsqueeze(1),
-                mask_main=mask_main_branch)
-    return data
-
-
-def read_subset_LH(LH_path, root_mass_min, root_mass_max, n_samples):
-    ''' 
-    Given a LH folder path LH_path with a fixed label (sigma_8, omega_m), 
-    read into the ytree data 'tree_0_0_0.dat', which contains ~1e5 trees
-    extract the subset with root mass ranging from (root_mass_min, root_mass_max)
-    then further randomly subset n_samples
-    return: n_samples of tree_samples (i.e. list of roots), and cosmological param y
-    '''
-    tree_collection = ytree.load(LH_path)
-    y = torch.tensor([tree_collection.hubble_constant, tree_collection.omega_matter], dtype=float).view(1,-1)
-    subset = []
-    for root in tree_collection:
-        if (root['Mvir']  > root_mass_min) & (root['Mvir'] < root_mass_max):
-            subset.append(root)
-    if len(subset) > n_samples:
-        tree_samples = random.sample(subset, n_samples)
-        return tree_samples, y, tree_collection #avoid garbage collection / ReferenceError
-    else:
-        return subset, y, tree_collection  #avoid garbage collection / ReferenceError
-
-
-def build_PyGdata_fromytree(root_mass_min, root_mass_max, n_samples, id_start=0, id_end=1000,
-                            all_LH_paths='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/',
-                            file_name='tree_0_0_0.dat',
-                            save_path='datasets/merger_trees/'):
-    ''' 
-    Loop over each LH_path from all_LH_paths directory
-    then apply read_subset_LH(LH_path, kargs**) to extract n_samples trees per LH_path
-    '''
-    data_list = []
-    count = 0
-    start = time.time()
-    for LH_id in range(id_start,id_end):
-        print(LH_id)
-        path = f'{all_LH_paths}/LH_{LH_id}/ConsistentTrees/{file_name}'
-        count += 1
-
-        try:
-            tree_samples, y, tree_collection = read_subset_LH(path, root_mass_min, root_mass_max, n_samples)
-            for root in tree_samples:
-                print(root)
-                data = construct_PyG_data(root)
-                data['y'] = y #add label attribute 
-                data['root_id'] = root['Orig_halo_ID']
-                data_list.append(data)
-
-        except IOError:
-            print(f"fail to read LH_{LH_id}")
-            continue
-        
-        # time
-        end = time.time()
-        duration = end - start
-        if count % 10 == 0:
-            print(f"processed {count} number of trees! used {duration:.4f}")
-
-        pickle.dump(data_list, open(f'{save_path}/data_min={int(root_mass_min/1e13)}e13_max={int(root_mass_max/1e14)}e14_n={n_samples}_start={id_start}_end={id_end}.pkl', 'wb'))
-
-    return data_list
-
-
-# def load_single_h5_trees(h5_path, max_trees=None, return_dict=False, normalize_first=True, eps=1e-8):
-#     """
-#     Reads all merger trees from a single HDF5 file returned from build_h5_fromytree_per_rank().
-
-#     Args:
-#         h5_path (str): Path to the HDF5 file.
-#         max_trees (int, optional): Max number of trees to read (for debugging).
-#         return_dict (bool): If True, return a nested dict; otherwise return list of PyG Data objects.
-
-#     Returns:
-#         list or dict: List of PyG Data objects or dict with structure {LH_id: [trees]}.
-#     """
-#     f = h5py.File(h5_path, 'r')
-#     data_list = [] if not return_dict else {}
-
-#     count = 0
-#     for group_name in f.keys():  # LH_0, LH_1, ...
-#         lh_group = f[group_name]
-#         y = torch.tensor(lh_group['y'][()], dtype=torch.float32)
-
-#         if return_dict:
-#             data_list[group_name] = []
-
-#         for tree_key in lh_group.keys():
-#             if tree_key == 'y':
-#                 continue
-#             tree_group = lh_group[tree_key]
-
-#             #read features
-#             main_branch = tree_group['main_branch'][()]
-#             node_name = torch.tensor(tree_group['node_name'][()], dtype=torch.long).unsqueeze(1)
-#             node_feats = torch.tensor(tree_group['node_feats'][()]).float()
-#             if normalize_first: #normalize mass, concentration by the root node
-#                 node_feats[:,:2] = node_feats[:,:2] / (node_feats[0,:2]+eps)
-#             node_order = torch.tensor(tree_group['node_order'][()], dtype=torch.long).unsqueeze(1)
-#             edge_index = torch.tensor(tree_group['edge_index'][()], dtype=torch.long).T.contiguous()
-
-#             data = Data(
-#                 x=node_feats,
-#                 edge_index=edge_index,
-#                 pos=node_order,  # DFS order as node position
-#                 mask_main=main_branch, #mask if the node is on the main branch
-#                 y=y,              # cosmology label
-#                 node_halo_id=node_name,
-#             )
-
-#             if return_dict:
-#                 data_list[group_name].append(data)
-#             else:
-#                 data_list.append(data)
-
-#             count += 1
-#             if max_trees is not None and count >= max_trees:
-#                 return data_list
-
-#     return data_list
 
 def mass_particle(omega_m, log=False):
     ''' 
@@ -595,24 +510,180 @@ def load_merged_h5_trees(h5_path, prune_flag=False, max_trees=None, feat_idx=[0,
                     return data_list
     return data_list
 
+def read_one_tree_from_lh_group(lh_group, tree_name, y, node_feature_mode='cosmo',
+                                feat_idx=[0,1,2,3,4], log_flag=True, prune_flag=False,
+                                subset_mode='full'):
+    ''' 
+    Load a tree from a group of the H5 file (i.e. group = all trees with root_mass > threshold for a particular LH id)
+    '''
+    tree_group = lh_group[tree_name]
+    #read features
+    node_name = torch.tensor(tree_group['node_name'][()], dtype=torch.long).unsqueeze(1)
+    node_order = torch.tensor(tree_group['node_order'][()], dtype=torch.long).unsqueeze(1)
+    edge_index = torch.tensor(tree_group['edge_index'][()], dtype=torch.long).T.contiguous()
+    
+    if node_feature_mode == 'cosmo':
+        node_feats = torch.tensor(tree_group['node_feats'][()]).float()
+        node_feats = node_feats[:, feat_idx]
+        if log_flag:
+            node_feats = torch.log10(node_feats)
+    elif node_feature_mode == 'random':
+        node_feats = torch.rand(node_order.shape[0], 1)
+    elif node_feature_mode == 'constant':
+        node_feats = torch.ones(node_order.shape[0], 1)
+    else:
+        raise NotImplementedError
+    
+    ## return PyG if available
+    lh_halo_ids = tree_name.split("_")
+    data = Data(
+            x=node_feats, #(log mass, log concen, log vmax, ...)
+            edge_index=edge_index,
+            pos=node_order,  # DFS depth order as node position
+            y=y,              # cosmology label
+            node_halo_id=node_name,
+
+        )
+    if prune_flag:
+        edge_attr = torch.tensor(tree_group['edge_attr'], dtype=torch.float)
+        data.edge_attr = edge_attr.unsqueeze(1)
+    else:
+        main_branch = tree_group['main_branch'][()]
+        data.mask_main = main_branch #mask if the node is on the main branch
+
+    data.root_halo_id = int(lh_halo_ids[-1])  # add halo ID attribute -> corresponding to uid in ytree
+    data.lh_id = int(lh_halo_ids[1]) # also store LH simulation ID
+    #subsetting
+    if subset_mode != "full":
+        data = get_subset(data, mode=subset_mode)
+    return data
+
+
+def random_sample_per_rank_h5(data_path, n_sample=5, seed=42):
+    ''' 
+    Return a subset of n_sample trees from a per_rank H5 file (containing multiple LH ids)
+    '''
+    random.seed(seed)
+    np.random.seed(seed)
+    data_samples = []
+    #1. get the total number of trees per lh
+    with h5py.File(data_path, 'r') as f:
+        for lh_group_name in f.keys():  # e.g. 'LH_0', 'LH_1', ...
+            lh_group = f[lh_group_name]
+            #keys = [key for key in list(lh_group.keys()) if (key!= 'y') & (lh_group[key]['node_order'].shape[0] < 2e5) ]
+            keys = [key for key in list(lh_group.keys()) if key!= 'y' ]
+            num_trees = len(keys) - 1 #keys contain all trees and y (always comes last), thus minus 1
+            #2. draw a random n_sample of indexes
+            rand_idx = np.random.permutation(np.arange(num_trees))[:n_sample]
+            selected_keys = [keys[i] for i in rand_idx]
+            #3. append he random subset of trees
+            y = torch.tensor(lh_group['y'][()], dtype=torch.float32)
+            if len(y.shape) == 1:
+                y = y.unsqueeze(0)
+            for key in selected_keys:
+                data = read_one_tree_from_lh_group(lh_group, key, y)
+                data_samples.append(data)
+    return data_samples
+
+def gather_samples(save_path, ranks, n_sample=5, seed=42):
+    ''' 
+    Return subset from all chosen per_rank h5 files
+    '''
+    subset = []
+    for lh_id in ranks:
+        start = time.time()
+        data_path = f"{save_path}/full_data_rank_{lh_id}.hdf5"
+        data_samples = random_sample_per_rank_h5(data_path, n_sample, seed=seed)
+        subset.extend(data_samples)
+        end = time.time()
+        print(f"processed lh_{lh_id}, with time={end - start} seconds!")
+    return subset
+
+def dataset_split_from_per_rank_h5(save_path="/mnt/home/thuang/ceph/playground/datasets/merger_trees_1000_feat_1e13", 
+                                   num_ranks=384, n_sample=5, train_ratio=0.6, val_ratio=0.2, produce_test_only=False):
+    ''' 
+    Split on the file level as per-rank files contain disjoint sets of LH ids
+    Return training/validation/test set of trees, where each LH id has (at most) n_sample of trees
+    '''
+    np.random.seed(42)
+    all_ranks = np.arange(num_ranks)
+    values = np.random.permutation(all_ranks)
+    split_train = int(len(values) * train_ratio)
+    split_val = int(len(values) * (train_ratio+val_ratio))
+    train_ranks = values[:split_train]
+    val_ranks = values[split_train:split_val]
+    test_ranks = values[split_val:]
+    print(train_ranks[:10], val_ranks[:10], test_ranks[:10])
+    if produce_test_only:
+        testset = gather_samples(save_path, test_ranks, n_sample)
+        return testset
+    else:
+        trainset = gather_samples(save_path, train_ranks, n_sample)
+        valset =  gather_samples(save_path, val_ranks, n_sample)
+        testset = gather_samples(save_path, test_ranks, n_sample)
+        return trainset, valset, testset
+    
+
+def prune_trim_dataset(dataset, save_flag=True, mode='train'):
+    trim_dataset = [trim_tree(data, connect_trim=True) for data in dataset]
+    if save_flag:
+        lh_num = 600 if mode == 'train' else 200
+        pickle.dump(trim_dataset,  open(f"{args.local_data_path}/trimmed_{mode}set_n={args.n_sample}_lh={lh_num}.pkl", 'wb') )
+    prune_trim_dataset = [prune_linear_nodes(trim_connected_data, use_threshold=True) for trim_connected_data in trim_dataset]
+    return prune_trim_dataset
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_path', type=pathlib.Path, \
                         default='/mnt/ceph/users/camels/PUBLIC_RELEASE/Rockstar/CAMELS-SAM/LH/', help='dataset parent dir')
     parser.add_argument('--file_name', type=str, \
                         default='tree_0_0_0.dat', help='graph dataset file')
-    parser.add_argument('--save_path', type=pathlib.Path, \
-                        default='datasets/merger_trees_1000_feat/', help='save pruned tree dataset directory')
-
+    parser.add_argument('--h5_path', type=pathlib.Path, \
+                        default='/mnt/home/thuang/ceph/playground/datasets/merger_trees_1000_feat_1e13', help='full tree dataset directory') #""
+    parser.add_argument('--local_data_path', type=pathlib.Path, \
+                        default='trim_tree_regression', help='save pruned trimmed tree dataset directory') #""
+    parser.add_argument('--prune_flag', action="store_true", help='prune trees')
+    parser.add_argument('--pre_split', action="store_true", help='load pre-split files')
+    parser.add_argument('--n_sample', type=int, default=3, help='number of trees per LH')
+    
     args = parser.parse_args()
-    dataset = load_merged_h5_trees("datasets/merger_trees_1000_feat/merged_data.hdf5", 
-                               normalize_mode="mass_particle", feat_idx=[0,1,2,3], #(mass, c, vmax, spin)
-                               log_mass=True)
-    truncate_mask = pickle.load(open(f"datasets/merger_trees_1000_feat/subset_Npart_575.pkl","rb"))
-    indices = np.where(truncate_mask)[0].tolist()
-    dataset_truncate = [data for i, data in enumerate(dataset) if i in indices]
-    start = time.time()
-    dataset_prune_truncate = [prune_linear_nodes(data) for data in dataset_truncate]
-    end = time.time()
-    print(f"finish pruning after {end-start} seconds on {len(dataset_prune_truncate)} trees!")
-    pickle.dump(dataset_prune_truncate, open(f"datasets/merger_trees_1000_feat/truncate_prune.pkl","wb"))
+    if args.prune_flag:
+        dataset = load_merged_h5_trees("datasets/merger_trees_1000_feat/merged_data.hdf5", 
+                                normalize_mode="mass_particle", feat_idx=[0,1,2,3], #(mass, c, vmax, spin)
+                                log_mass=True)
+        truncate_mask = pickle.load(open(f"datasets/merger_trees_1000_feat/subset_Npart_575.pkl","rb"))
+        indices = np.where(truncate_mask)[0].tolist()
+        dataset_truncate = [data for i, data in enumerate(dataset) if i in indices]
+        start = time.time()
+        dataset_prune_truncate = [prune_linear_nodes(data) for data in dataset_truncate]
+        end = time.time()
+        print(f"finish pruning after {end-start} seconds on {len(dataset_prune_truncate)} trees!")
+        pickle.dump(dataset_prune_truncate, open(f"datasets/merger_trees_1000_feat/truncate_prune.pkl","wb"))
+
+    else: #create samples from full Camel-Sam collection of trees with node mass > 1e13
+        print("loading pre-split train/val/test files")
+        if args.pre_split:
+            trainset = pickle.load(open(f"{args.local_data_path}/trainset_n={args.n_sample}_lh=600.pkl", 'rb'))
+            valset = pickle.load(open(f"{args.local_data_path}/valset_n={args.n_sample}_lh=200.pkl", 'rb'))
+            testset = pickle.load(open(f"{args.local_data_path}/testset_n={args.n_sample}_lh=200.pkl", 'rb'))
+
+        else:
+            trainset, valset, testset = dataset_split_from_per_rank_h5(args.h5_path, num_ranks=384, n_sample=args.n_sample)
+            pickle.dump(trainset, open(f"{args.local_data_path}/trainset_n={args.n_sample}_lh=600.pkl", 'wb') )
+            pickle.dump(valset, open(f"{args.local_data_path}/valset_n={args.n_sample}_lh=200.pkl", 'wb') )
+            pickle.dump(testset, open(f"{args.local_data_path}/testset_n={args.n_sample}_lh=200.pkl", 'wb') )
+
+        prune_trim_trainset = prune_trim_dataset(trainset, mode='train')
+        pickle.dump(prune_trim_trainset,  open(f"{args.local_data_path}/pruned_trimmed_trainset_n={args.n_sample}_lh=600.pkl", 'wb') )
+
+        prune_trim_valset = prune_trim_dataset(valset, mode='val')
+        pickle.dump(prune_trim_valset,  open(f"{args.local_data_path}/pruned_trimmed_valset_n={args.n_sample}_lh=200.pkl", 'wb') )
+
+        prune_trim_testset = prune_trim_dataset(testset, mode='test')
+        pickle.dump(prune_trim_testset,  open(f"{args.local_data_path}/pruned_trimmed_testset_n={args.n_sample}_lh=200.pkl", 'wb') )
+
+
+
+
+    
