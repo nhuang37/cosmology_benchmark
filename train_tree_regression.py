@@ -11,8 +11,8 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
-from tree_util import load_merged_h5_trees, split_dataloader, dataset_to_dataloader
-from model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, eval_and_plot, plot_train_val_loss
+from utils.tree_util import load_merged_h5_trees, split_dataloader, dataset_to_dataloader
+from models.model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, eval_and_plot, plot_train_val_loss
 import argparse
 import pathlib
 import math
@@ -31,9 +31,9 @@ if __name__ == "__main__":
     # parser.add_argument('--data_path', type=pathlib.Path, \
     #                     default="datasets/merger_trees_1000_feat_1e13/merged_data.hdf5", help='data path')
     parser.add_argument('--trainset_path', type=pathlib.Path, \
-                        default='trim_tree_regression/pruned_trimmed_trainset_n=3_lh=600.pkl', help='training data path')
+                        default='/mnt/home/thuang/playground/datasets/pruned_trimmed_tree_small/pruned_trimmed_trainset_n=3_lh=600.pkl', help='training data path')
     parser.add_argument('--valset_path', type=pathlib.Path, \
-                        default='trim_tree_regression/pruned_trimmed_valset_n=3_lh=200.pkl', help='validation data path')
+                        default='/mnt/home/thuang/playground/datasets/pruned_trimmed_tree_small/pruned_trimmed_valset_n=3_lh=200.pkl', help='validation data path')
     
     parser.add_argument('--save_path', type=pathlib.Path, \
                         default='tree_regression', help='model checkpoint dir')
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_type', type=str, default='MPNN', 
                         choices=['MPNN', 'MLPAgg', "DeepSet"], help='model type')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
-    parser.add_argument('--target_id', type=int, default=0, help='0: omega_m; 1: sigma_8')
+    parser.add_argument('--target_id', type=int, default=None, help='None: both; 0: omega_m; 1: sigma_8')
     parser.add_argument('--hid_dim', type=int, default=16, help='hidden dim')
     parser.add_argument('--n_layer', type=int, default=1, help='number of MP layers')
 
@@ -52,7 +52,7 @@ if __name__ == "__main__":
                         choices=["vmax_threshold","identity"], help='preprocess features: vmax - threshold at 20; mass - normalize by particle weight (roughly ~omega_m), or root particle masss')
     parser.add_argument('--feat_idx', '--list', nargs='+', type=int, help='feature dimension: 0 - mass; 1 - concentration; 2-vmax')
     parser.add_argument('--log_flag', action="store_true", help='normalize the node mass by taking log')
-    parser.add_argument('--train_n_sample',type=int, default=5, help='number of training tree per LH label (to remove spurious correlation with labels); if -1 then use all trees')
+    parser.add_argument('--train_n_sample',type=int, default=3, help='number of training tree per LH label (to remove spurious correlation with labels); if -1 then use all trees')
     parser.add_argument('--node_feature_mode',type=str, default='cosmo',
                         choices=["cosmo","random","constant"], help='using cosmological features or uninformative node feature')
     parser.add_argument('--prune_flag', action="store_true", help='if true: use the pruned dataset')
@@ -60,6 +60,8 @@ if __name__ == "__main__":
     parser.add_argument('--subset_mode',type=str, default='full',
                         choices=["full","main_branch","leaves"], help='using full tree, main branch, or leaves only')
     parser.add_argument('--log_mass_threshold',type=float, default=math.log10(3e10), help='subset nodes based on their mass (to remove spurious correlation with labels)')
+    parser.add_argument('--time_flag', action="store_true", help='if true: use time as node feature')
+    parser.add_argument('--no_mass_flag', action="store_true", help='if true: exclude mass as node feature')
 
     args = parser.parse_args()
     print(args)
@@ -92,13 +94,14 @@ if __name__ == "__main__":
     trainset = pickle.load(open(args.trainset_path, "rb"))
     valset = pickle.load(open(args.valset_path, "rb"))
     train_loader, val_loader, _ = dataset_to_dataloader(trainset, valset, batch_size=args.batch_size,
-                                                         normalize=True)
+                                                         normalize=True, time=args.time_flag,
+                                                         no_mass = args.no_mass_flag)
     #prune_trim_testset = 
     batch = next(iter(train_loader))
     print(batch.x[:10])
 
     node_dim = batch.x.shape[1]
-    out_dim = 1
+    out_dim = 1 if args.target_id is not None else 2
     
     mlp_only = False
     if args.model_type == 'MPNN':
