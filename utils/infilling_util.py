@@ -97,6 +97,14 @@ def find_parent_node(edge_index, child_node):
     parent_nodes = edge_index[1]
     return parent_nodes[child_nodes == child_node].item() 
 
+def find_merger_nodes(tree):
+    child_nodes = tree.edge_index[0]
+    parent_nodes = tree.edge_index[1]
+    num_nodes = tree.x.shape[0]
+    in_degree = degree(parent_nodes, num_nodes=num_nodes)  # is parent of someone
+    merger_mask = in_degree == 2
+    return set(torch.arange(num_nodes)[merger_mask].tolist())
+
 def coarse_grain_tree(data: Data, subset_times: torch.tensor) -> Data:
     ''' 
     keep even nodes, mask out odd nodes
@@ -108,7 +116,9 @@ def coarse_grain_tree(data: Data, subset_times: torch.tensor) -> Data:
     keep_mask = subset_up_to_decimals(data.x[:,-1], subset_times)
     kept_nodes = set(torch.nonzero(keep_mask, as_tuple=False).flatten().tolist())
     dropped_nodes = set((range(0,num_nodes))).difference(kept_nodes)
-    drop_dict = {data.node_halo_id[find_parent_node(edge_index, node)]: data.node_halo_id[node] for node in dropped_nodes}
+    merger_nodes = find_merger_nodes(data)
+    dropped_merger_nodes = dropped_nodes.intersection(merger_nodes)
+    drop_merger_dict = {data.node_halo_id[find_parent_node(edge_index, node)]: data.node_halo_id[node] for node in dropped_merger_nodes}
 
     # Optional edge attributes
     has_edge_attr = hasattr(data, 'edge_attr') and data.edge_attr is not None
@@ -176,7 +186,7 @@ def coarse_grain_tree(data: Data, subset_times: torch.tensor) -> Data:
     if data.edge_attr is not None:
         data_new.edge_attr = torch.tensor(new_edge_attr, dtype=torch.float).unsqueeze(1)  # shape [E, 1]        
 
-    return data_new, drop_dict
+    return data_new, drop_merger_dict
 
 def log_norm_standardize(x):
     x_log = torch.log10(x)
@@ -197,16 +207,15 @@ def build_infill_tree(data, kept_times, verbose=False):
     # time_steps = torch.unique(binary_tree.x[:,-1])
     # kept_steps = [i for i in range(len(time_steps)-1,0,-k)]
     # kept_times = time_steps[kept_steps]
-    coarsen_tree, dropped_nodes = coarse_grain_tree(binary_tree, kept_times)
+    coarsen_tree, dropped_merger_nodes = coarse_grain_tree(binary_tree, kept_times)
     #step 3: binarize the coarsen-binary tree and obtain T
     infill_tree = trim_tree_to_binary(coarsen_tree)
     #step 4: find merger nodes in T
+    num_nodes = infill_tree.x.shape[0]
     child_nodes = infill_tree.edge_index[0]
     parent_nodes = infill_tree.edge_index[1]
-    num_nodes = infill_tree.x.shape[0]
-    in_degree = degree(parent_nodes, num_nodes=num_nodes)  # is parent of someone
-    merger_mask = in_degree == 2
-    num_merger_nodes = merger_mask.sum()
+    merger_nodes = find_merger_nodes(infill_tree)
+    num_merger_nodes = len(merger_nodes)
     # standardize data here
     infill_tree.x[:,:-1] = log_norm_standardize(infill_tree.x[:,:-1])
     if verbose:
@@ -217,7 +226,7 @@ def build_infill_tree(data, kept_times, verbose=False):
     infill_tree.x = torch.cat([infill_tree.x, torch.zeros(num_merger_nodes, d)])
     infill_tree.label = -1 * torch.ones(num_nodes+num_merger_nodes).long() #ignore non-virtual nodes by setting ignore_index = -1
     infill_tree.vn_mask = torch.BoolTensor([False]* (num_nodes+num_merger_nodes))
-    for i, merger_node in enumerate(torch.arange(num_nodes)[merger_mask]):
+    for i, merger_node in enumerate(merger_nodes):
         virtual_node = i + num_nodes
         ancestors = child_nodes[parent_nodes == merger_node]
         assert ancestors.shape[0] == 2, "must only have two ancestors by design of binary tree!"
@@ -226,7 +235,7 @@ def build_infill_tree(data, kept_times, verbose=False):
                                   [ancestors[1], virtual_node]], dtype=torch.long).T
         #print(new_edges.shape, infill_tree.edge_index.shape)
         infill_tree.edge_index = torch.hstack([infill_tree.edge_index, new_edges])
-        if infill_tree.node_halo_id[merger_node] in list(dropped_nodes.keys()): #use node_halo_id as unique identifiers!
+        if infill_tree.node_halo_id[merger_node] in list(dropped_merger_nodes.keys()): #use node_halo_id as unique identifiers!
             infill_tree.label[num_nodes+i] = 1 
         else:
             infill_tree.label[num_nodes+i] = 0
