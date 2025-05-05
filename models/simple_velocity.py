@@ -132,14 +132,16 @@ def compute_fourier_features(x, y, z, K, L, period=1000, normalize=True):
     else:
         return Feat
 
-def online_least_squares(w0, X, y, eps=1e-8,  max_step=1.0): #w0 shape (1,n); X shape (d,n); y shape (n);
-    sqrNorm = (X * X).sum(dim=0) #shape (n)
-    sqrNorm = torch.clamp(sqrNorm, min=eps)  # avoid division by zero
-    residuals = y - w0 @ X             # shape: (n)
-    steps = residuals / sqrNorm    # shape: (n,)
-    steps = torch.clamp(steps, min=-max_step, max=max_step)  # prevent exploding updates
-    grad = X * steps
-    w = w0 + grad.sum(dim=1)       # shape: (d,)
+def online_least_squares(w0, X, y, eps=1e-8,  max_step=1.0): #w0 shape (d); X shape (d,n); y shape (n);
+    w = w0.clone()
+    sqrNorm = (X * X).sum(dim=0) #shape (n) #5000 steps
+    #sqrNorm = torch.clamp(sqrNorm, min=eps)  # avoid division by zero
+    for j in range(y.shape[0]):
+        residuals = y[j] - w @ X[:,j]             # shape: (n)
+        #steps = torch.clamp(steps, min=-max_step, max=max_step)  # prevent exploding updates
+        grad = residuals * X[:,j]
+        step_size = 1/sqrNorm[j]
+        w = w + step_size * grad       # shape: (d,)
     return w
 
 
@@ -176,9 +178,9 @@ def eval(output_dir, data_dir, idxTest, wa,
         feat_file = f"{output_dir}/{idx}.pt"
         if os.path.isfile(feat_file):
             list_of_ff = torch.load(feat_file, map_location=device)
-            Fx = list_of_ff[0]
+            Fx = list_of_ff[0] 
             Fy = list_of_ff[1]
-            Fz = list_of_ff[2]
+            Fz = list_of_ff[2] 
         else:
             Fx = compute_fourier_features(x,y,z,K,L, period).to(device)
             Fy = compute_fourier_features(y,z,x,K,L, period).to(device)
@@ -204,12 +206,16 @@ if __name__ == '__main__':
                         default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/fourier_features/BSQ',
                          help='save path')
     parser.add_argument('--num_clouds', default=500, type=int, help="number of point clouds")
-    parser.add_argument('--K', default=20, type=int, help="number of x frequencies")
-    parser.add_argument('--L', default=20, type=int, help="number of y/z frequencies")
+    parser.add_argument('--K', default=72, type=int, help="number of x frequencies")
+    parser.add_argument('--L', default=36, type=int, help="number of y/z frequencies")
 
     parser.add_argument('--old', action="store_true", help='if true: load old point clouds')
+    parser.add_argument('--pre_compute', action="store_true", help='if true: only compute features')
+    parser.add_argument('--start_idx', default=338, type=int,help='starting point cloud idx')
+    parser.add_argument('--end_idx', default=500, type=int,help='ending point cloud idx')
 
     args = parser.parse_args()
+    print(args)
 
     #Data split
     dir = args.h5_path
@@ -235,65 +241,85 @@ if __name__ == '__main__':
         data_path = 'datasets/position_velocity/position_velocity_m=2000_n=5000.pkl'
         dataset = pickle.load(open(data_path, 'rb'))
         Xs, Vs = dataset['Xs'], dataset['y']
-        output_dir = '/mnt/home/thuang/ceph/playground/datasets/point_clouds/fourier_features/BSQ_old'
-
-    #Main Trianing Loop
-    t0 = time.time()
-    print(f"Training...")
-    ff_time_sum, ls_time_sum = 0, 0
-    for t in idxTrain:
-        if args.old:
-            x,y,z,vx,vy,vz = load_point_cloud_pkl(Xs, Vs, t, device=device)
-        else:
-            x,y,z,vx,vy,vz = load_point_cloud_h5(dir, t) #each is a (n,1) vector or (1,n) ? CHECK
-        start_time = time.time()
-        feat_file = f"{output_dir}/{t}.pt"
-        if os.path.isfile(feat_file):
-        # if args.load_features:
-            if t % 100 == 0:
-                print(f"loading {t}")
-            list_of_ff = torch.load(feat_file, map_location=device)
-            Fx = list_of_ff[0]
-            Fy = list_of_ff[1]
-            Fz = list_of_ff[2]
-        else:
+        output_dir = f'/mnt/home/thuang/ceph/playground/datasets/point_clouds/fourier_features/BSQ_old_K={K}_L={L}'
+    
+    if args.pre_compute:
+        print(f"pre computing features from cloud idx = {args.start_idx} to idx={args.end_idx}")
+        device = 'cpu'
+        t0 = time.time()
+        for t in range(args.start_idx, args.end_idx):
+            if args.old:
+                x,y,z,vx,vy,vz = load_point_cloud_pkl(Xs, Vs, t, device=device)
+            else:
+                x,y,z,vx,vy,vz = load_point_cloud_h5(dir, t, device=device) #each is a (n,1) vector or (1,n) ? CHECK
+            feat_file = f"{output_dir}/{t}.pt"
             Fx = compute_fourier_features(x,y,z,K,L, period).to(device)
             Fy = compute_fourier_features(y,z,x,K,L, period).to(device)
             Fz = compute_fourier_features(z,x,y,K,L, period).to(device)
             os.makedirs(output_dir, exist_ok=True)
             torch.save([Fx,Fy,Fz], feat_file)
-        ff_time = time.time()
-        ff_time_sum += ff_time - start_time
+            if t % 20 ==0:
+                cur_time = time.time()
+                print(f"computed {t-args.start_idx} clouds, using {(cur_time - t0):.4f} time")
 
-        wt = online_least_squares(wt,Fx,vx)
-        wt = online_least_squares(wt,Fy,vy)
-        wt = online_least_squares(wt,Fz,vz)
-        wa = (1-1/(t+1))*wa + (1/(t+1))*wt
-        ls_time = time.time()
-        ls_time_sum += ls_time - ff_time
-        if t % 20 == 0:
-            print(wa[:10])
-            print(f"processed {t+1} clouds, ff_time={ff_time_sum:.4f}, ls_time={ls_time_sum:.4f}")
-
-    #EVAL
-    print(f"Evaluating....")
-    if args.old:
-        mse_train, R2_train = eval(output_dir, dir, idxTrain, wa, args.old, Xs, Vs, device, K=K, L=L)
-        mse_test, R2_test = eval(output_dir, dir, idxTest, wa, args.old, Xs, Vs, device, K=K, L=L)
     else:
-        mse_train, R2_train = eval(output_dir, dir, idxTrain, wa, K=K, L=L)
-        mse_test, R2_test = eval(output_dir, dir, idxTest, wa, K=K,L=L)
-    t1 = time.time()
-    print(f"MSE_train={mse_train.item():.4f}, R2_train={R2_train.item():.4f}") 
-    print(f"MSE_test={mse_test.item():.4f}, R2_test={R2_test.item():.4f}")
-    torch.save(wa, f"{output_dir}/wa_{n}.pt")
+        #Main Trianing Loop
+        t0 = time.time()
+        print(f"Training...")
+        ff_time_sum, ls_time_sum = 0, 0
+        for t in idxTrain:
+            if args.old:
+                x,y,z,vx,vy,vz = load_point_cloud_pkl(Xs, Vs, t, device=device)
+            else:
+                x,y,z,vx,vy,vz = load_point_cloud_h5(dir, t) #each is a (n,1) vector or (1,n) ? CHECK
+            start_time = time.time()
+            feat_file = f"{output_dir}/{t}.pt"
+            if os.path.isfile(feat_file):
+            # if args.load_features:
+                if t % 100 == 0:
+                    print(f"loading {t}")
+                list_of_ff = torch.load(feat_file, map_location=device)
+                Fx = list_of_ff[0] 
+                Fy = list_of_ff[1] 
+                Fz = list_of_ff[2] 
+            else:
+                Fx = compute_fourier_features(x,y,z,K,L, period).to(device)
+                Fy = compute_fourier_features(y,z,x,K,L, period).to(device)
+                Fz = compute_fourier_features(z,x,y,K,L, period).to(device)
+                os.makedirs(output_dir, exist_ok=True)
+                torch.save([Fx,Fy,Fz], feat_file)
+            ff_time = time.time()
+            ff_time_sum += ff_time - start_time
 
-    #save results
-    plt.plot(wa.flatten().detach().cpu())
-    title = f"R2_train={R2_train.item():.4f}, R2_test={R2_test.item():.4f}, n={n} clouds"
-    #plt.legend()
-    plt.title(title)
-    plt.savefig(f"{output_dir}/wa_{n}_results.png", dpi=150)
+            wt = online_least_squares(wt,Fx,vx)
+            wt = online_least_squares(wt,Fy,vy)
+            wt = online_least_squares(wt,Fz,vz)
+            wa = (1-1/(t+1))*wa + (1/(t+1))*wt
+            ls_time = time.time()
+            ls_time_sum += ls_time - ff_time
+            if t % 2 == 0:
+                print(wa[:10])
+                print(f"processed {t+1} clouds, ff_time={ff_time_sum:.4f}, ls_time={ls_time_sum:.4f}")
+
+        #EVAL
+        torch.save(wa, f"{output_dir}/wa_{n}.pt")
+        print(f"Evaluating....")
+        if args.old:
+            mse_train, R2_train = eval(output_dir, dir, idxTrain[::5], wa, args.old, Xs, Vs, device, K=K, L=L)
+            mse_test, R2_test = eval(output_dir, dir, idxTest, wa, args.old, Xs, Vs, device, K=K, L=L)
+        else:
+            mse_train, R2_train = eval(output_dir, dir, idxTrain[::5], wa, K=K, L=L)
+            mse_test, R2_test = eval(output_dir, dir, idxTest, wa, K=K,L=L)
+        t1 = time.time()
+        print(f"MSE_train_20pct={mse_train.item():.4f}, R2_train_20pct={R2_train.item():.4f}") 
+        print(f"MSE_test={mse_test.item():.4f}, R2_test={R2_test.item():.4f}")
+
+        #save results
+        plt.plot(wa.flatten().detach().cpu())
+        title = f"R2_train_20pct={R2_train.item():.4f}, R2_test={R2_test.item():.4f}, n={n} clouds"
+        #plt.legend()
+        plt.title(title)
+        plt.savefig(f"{output_dir}/wa_{n}_results.png", dpi=150)
 
 
 
