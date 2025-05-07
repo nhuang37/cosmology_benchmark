@@ -1,99 +1,125 @@
-#partially adapted from the Vector Neuron: https://github.com/FlyingGiraffe/vnn
-
 import torch
 import torch.nn as nn
 from torch.nn import Sequential as Seq, Linear as Lin, ReLU
 from torch_geometric.utils import scatter, degree
 from torch_geometric.nn import LayerNorm
-from model import NodeModelIn, EdgeNodeMP
+#from model import NodeModelIn, EdgeNodeMP
+from torch_geometric.nn import MessagePassing
+from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
+from torch_geometric.nn import radius_graph, knn_graph
+import torch.nn.functional as F
+from torch_geometric.data import Data
 
-class VN_Lin(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(VN_Lin, self).__init__()
-        self.Lin = nn.Linear(in_channels, out_channels, bias=False)
-    
-    def forward(self,x):
-        ''' 
-        x: (N, d_in, 3)
-        return (N, d_out, 3)
-        '''
-        x_out = self.Lin(x.permute(0,2,1))
-        return x_out.permute(0,2,1)
+def count_parameters(model, trainable_only=True):
+    """Count the number of parameters in a PyTorch model.
 
-class VN_ReLU(nn.Module):
-    def __init__(self, in_channels, share_nonlinearity=False, eps=1e-6):
-        super(VN_ReLU, self).__init__()
-        if share_nonlinearity:
-            self.proj_dir = VN_Lin(in_channels, 1)
-        else:
-            self.proj_dir = VN_Lin(in_channels, in_channels)
-        self.eps = eps
-    
-    def forward(self,x):
-        ''' 
-        x: (N, d_in, 3)
-        return (N, d_in, 3)
-        '''
-        dir = self.proj_dir(x) #(N, d_in, 3)
-        dir_norm = (dir * dir).sum(2, keepdim=True).sqrt()
-        dir_unit = dir / dir_norm
-        dotprod = (x * dir_unit).sum(2, keepdim=True)
-        mask = (dotprod >= 0).float()
-        x_out = (mask * x) + (1-mask)*(x - dotprod * dir_unit)
-        return x_out
+    Args:
+        model (torch.nn.Module): The PyTorch model.
+        trainable_only (bool): If True, only count parameters that require gradients.
 
+    Returns:
+        int: Total number of parameters.
+    """
+    if trainable_only:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    else:
+        return sum(p.numel() for p in model.parameters())
 
-class VN_EdgeNodeMP(EdgeNodeMP):
-    def __init__(self, node_dim=None, edge_dim=None, hid_dim=None, inter_dim=None, reduce='mean', 
-                 norm=False, linear=False):
-        EdgeNodeMP.__init__(self, node_dim, edge_dim, hid_dim, inter_dim, reduce, norm, linear)
-        ## inherit other init params
-        ## monkey patch the layers to ensure O(d) equivariance
-        if linear: # perserve O(d) equivariance for input X = (N, d_in, 3), by Lin(X.permuta(0,2,1)) (acting d_in -> d_out)
-            self.edge_mlp_1 = VN_Lin(node_dim + edge_dim, inter_dim)
-            self.edge_mlp_1.bias.data.fill_(0)
-        else:
-            self.edge_mlp_1 = Seq(VN_Lin(node_dim + edge_dim, hid_dim), 
-                              VN_ReLU(hid_dim, hid_dim), 
-                              VN_Lin(hid_dim, inter_dim))
-
-class VN_Node_GNN(nn.Module):
-    def __init__(self, node_dim=1, edge_dim=1, hid_dim=16, out_dim=1, 
-                 reduce='mean', norm=False, linear=False, n_layers=1):
+### Simple GNN
+class MLP(nn.Module):
+    def __init__(self, widths, activation='gelu'):
         super().__init__()
         self.layers = nn.ModuleList()
-        self.layers.append(VN_EdgeNodeMP(node_dim, edge_dim, hid_dim, hid_dim, reduce, norm))
-        for l in range(1,n_layers):
-            self.layers.append(VN_EdgeNodeMP(node_dim, edge_dim, hid_dim, hid_dim, reduce, norm))
-        self.output_layer = Seq(Lin(hid_dim, hid_dim), 
-                              ReLU(),
-                            #   Lin(hid_dim, hid_dim),
-                            #   ReLU(), 
-                              Lin(hid_dim, out_dim))
+        self.activation = getattr(F, activation)
+        for i in range(len(widths) - 1):
+            self.layers.append(nn.Linear(widths[i], widths[i + 1]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            if i < len(self.layers) - 1:
+                x = self.activation(x)
+        return x
+
+
+class VelocityEdgeConv(MessagePassing):
+    #https://arxiv.org/pdf/2411.19484, eqn15 inspired: v(x_i) = C sum_{j} MLP(x_j) * (x_j - x_i) / |x_j - x_i|^3
+    def __init__(self, in_channels, d_hidden, out_channels, edge_dim):
+        super().__init__(aggr='mean') #  aggregation. => can try "add"
+        self.density_mlp = Seq(Lin(in_channels, d_hidden),
+                       ReLU(),
+                       Lin(d_hidden, d_hidden),
+                       ReLU(),
+                       Lin(d_hidden, out_channels))
+        self.edge_mlp = Seq(Lin(edge_dim, d_hidden),
+                       ReLU(),
+                       Lin(d_hidden, d_hidden),
+                       ReLU(),
+                       Lin(d_hidden, out_channels))
+
+    def forward(self, x, edge_index, edge_attr):
+        # x has shape [N, in_channels]
+        # edge_index has shape [2, E]
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr) #sum over neighbor messages
+
+    def message(self, x_i, x_j, edge_attr):
+        # x_i has shape [E, in_channels]
+        # x_j has shape [E, in_channels]
+        edge_feat = self.edge_mlp(edge_attr)
+        return self.density_mlp(x_j)*edge_feat #[E, out_channels]
+    
+class VelocityGNN(torch.nn.Module):
+    def __init__(self, node_dim=3, edge_dim=3, 
+                 d_hidden=24, 
+                 message_passing_steps=3, activation='relu'):
+        super().__init__()
+        self.message_passing_steps = message_passing_steps
+
+        self.gnn_layers = nn.ModuleList([VelocityEdgeConv(node_dim, d_hidden, d_hidden, edge_dim)])
+        #self.gnn_layers = nn.ModuleList()
+        for i in range(message_passing_steps-1):
+            self.gnn_layers.append(VelocityEdgeConv(d_hidden, d_hidden, d_hidden, edge_dim))
+        readout_dims = [d_hidden, d_hidden, node_dim]
+        self.readout_mlp = MLP(readout_dims, activation=activation)
+        
     def forward(self, data):
-        h, edge_index, edge_attr, node_weight = data.x, data.edge_index, data.edge_attr, data.node_weight
-        for layer in self.layers:
-            h, edge_attr = layer(h, edge_index, edge_attr, node_weight)
-        out = self.output_layer(h)
-        return out
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        for gnn in self.gnn_layers:
+            x = gnn(x, edge_index, edge_attr)
+
+        return self.readout_mlp(x)  # shape [num_nodes, node_dim]
 
 
-## simple testing code
-# in_channels = 1
-# out_channels = 5
-# lin_layer = VN_Lin(in_channels, out_channels)
-# relu_layer = VN_ReLU(out_channels, out_channels)
-# x = torch.rand(10,1,3)
-# x_lin = lin_layer(x)
-# out = relu_layer(x_lin)
-# print(x_lin.shape, out.shape)
-# model = VN_EdgeNodeMP(node_dim=in_channels, edge_dim=1, hid_dim=out_channels, inter_dim=out_channels)
-# edge_index = torch.tensor([[0,4],
-#                            [1,4],
-#                            [2,5],
-#                            [3,5],
-#                            [4,6],
-#                            [5,6]], dtype=torch.int64).T
-# edge_attr = torch.rand((6,1,3)) ##Must be a 3D tensor
-# node_new, edge_new = model(x, edge_index, edge_attr)
-# print(node_new.shape, edge_new.shape)
+class VelocityHierarchicalGNN(torch.nn.Module):
+    def __init__(self, node_dim=3, edge_dim=3, 
+                 d_hidden=24, 
+                 message_passing_steps=3, activation='relu'):
+        super().__init__()
+        self.message_passing_steps = message_passing_steps
+
+        self.gnn_coarse = nn.ModuleList([VelocityEdgeConv(node_dim, d_hidden, d_hidden, edge_dim)])
+        for i in range(message_passing_steps-1):
+            self.gnn_coarse.append(VelocityEdgeConv(d_hidden, d_hidden, d_hidden, edge_dim))
+        
+        self.gnn_fine = nn.ModuleList([VelocityEdgeConv(node_dim, d_hidden, d_hidden, edge_dim)])
+        for i in range(message_passing_steps-1):
+            self.gnn_fine.append(VelocityEdgeConv(d_hidden, d_hidden, d_hidden, edge_dim))
+        
+        readout_dims = [d_hidden, d_hidden, node_dim]
+        self.readout_mlp_coarse = MLP(readout_dims, activation=activation)
+        self.readout_mlp_fine = MLP(readout_dims, activation=activation)
+
+    def forward(self, data, data_coarse):
+        x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+        x_c, edge_index_c, edge_attr_c, cluster = data_coarse.x, data_coarse.edge_index, data_coarse.edge_attr, data_coarse.cluster_idx
+        for gnn in self.gnn_coarse:
+            x_c = gnn(x_c, edge_index_c, edge_attr_c)
+        out_c = self.readout_mlp_coarse(x_c) #shape [num_coarse_nodes, node_dim]
+        out_c_tofine = out_c[cluster] #shape [num_nodes, node_dim]
+
+        for gnn in self.gnn_fine:
+            x = gnn(x, edge_index, edge_attr)
+        correct_term = self.readout_mlp_fine(x)  # shape [num_nodes, node_dim]
+        out = out_c_tofine + correct_term 
+
+        return out, out_c 

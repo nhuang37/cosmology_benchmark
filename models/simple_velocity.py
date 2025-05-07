@@ -179,7 +179,7 @@ def eval(output_dir, data_dir, idxTest, wa,
         if os.path.isfile(feat_file):
             list_of_ff = torch.load(feat_file, map_location=device)
             Fx = list_of_ff[0] 
-            Fy = list_of_ff[1]
+            Fy = list_of_ff[1] 
             Fz = list_of_ff[2] 
         else:
             Fx = compute_fourier_features(x,y,z,K,L, period).to(device)
@@ -281,7 +281,7 @@ if __name__ == '__main__':
                 list_of_ff = torch.load(feat_file, map_location=device)
                 Fx = list_of_ff[0] 
                 Fy = list_of_ff[1] 
-                Fz = list_of_ff[2] 
+                Fz = list_of_ff[2]
             else:
                 Fx = compute_fourier_features(x,y,z,K,L, period).to(device)
                 Fy = compute_fourier_features(y,z,x,K,L, period).to(device)
@@ -297,7 +297,7 @@ if __name__ == '__main__':
             wa = (1-1/(t+1))*wa + (1/(t+1))*wt
             ls_time = time.time()
             ls_time_sum += ls_time - ff_time
-            if t % 2 == 0:
+            if t % 20 == 0:
                 print(wa[:10])
                 print(f"processed {t+1} clouds, ff_time={ff_time_sum:.4f}, ls_time={ls_time_sum:.4f}")
 
