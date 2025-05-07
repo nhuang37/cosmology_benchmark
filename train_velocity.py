@@ -229,31 +229,30 @@ def standardize_dataset(PyGdataset, train_ranks, val_ranks, test_ranks=None):
 #     args = parser.parse_args()
 #     print(args)
 
-def run_training(hid_dim, n_layer, lr, save_dir, args):
-    PyGdataset = torch.load(args.processed_dataset_path) 
+def run_training(train_path, val_path,
+                 hid_dim, n_layer, lr, save_dir, args,
+                 coarse_train_path=None, coarse_val_path=None):
+    
+    train_set = torch.load(train_path)
+    val_set = torch.load(val_path) 
     if args.HGNN_flag:
-        PyGdataset_coarse = torch.load(args.processed_coarsen_dataset_path) 
+        coarse_train_set = torch.load(coarse_train_path) 
+        coarse_val_set = torch.load(coarse_val_path)
 
-    train_ratio = 0.6
-    val_ratio = 0.2
-    values = np.arange(args.num_clouds)
-    split_train = int(len(values) * train_ratio)
-    split_val = int(len(values) * (train_ratio + val_ratio))
-    train_ranks = values[:split_train]
-    val_ranks = values[split_train:split_val]
-    test_ranks = values[split_val:]
-
-    train_set, val_set, test_set = standardize_dataset(PyGdataset, train_ranks, val_ranks, test_ranks)
+    X_mean, X_std, V_mean, V_std = compute_X_V_mean_std(train_set)
+    train_set = [standardize_data(data, X_mean, X_std, V_mean, V_std) for data in train_set]
+    val_set = [standardize_data(data, X_mean, X_std, V_mean, V_std) for data in val_set]
+    print(len(train_set), len(val_set))
     if args.HGNN_flag:
-        train_set_c, val_set_c, test_set_c = standardize_dataset(PyGdataset_coarse, train_ranks, val_ranks, test_ranks)
+        train_set_c = [standardize_data(data, X_mean, X_std, V_mean, V_std) for data in coarse_train_set]
+        val_set_c = [standardize_data(data, X_mean, X_std, V_mean, V_std) for data in coarse_val_set]
         train_set_pair = PairedDataset(train_set, train_set_c)
         val_set_pair = PairedDataset(val_set, val_set_c)
-        test_set_pair = PairedDataset(test_set, test_set_c)
-        train_loader, val_loader, test_loader = build_dataloaders(train_set_pair, val_set_pair, test_set_pair, 
+        train_loader, val_loader, _ = build_dataloaders(train_set_pair, val_set_pair, 
                                                         batch_size=1, shuffle=True)
         model = VelocityHierarchicalGNN(node_dim=3, d_hidden=hid_dim, message_passing_steps=n_layer, activation='relu')
     else:
-        train_loader, val_loader, test_loader = build_dataloaders(train_set, val_set, test_set, batch_size=1, shuffle=True)
+        train_loader, val_loader, _ = build_dataloaders(train_set, val_set, batch_size=1, shuffle=True)
         model = VelocityGNN(node_dim=3, d_hidden=hid_dim, message_passing_steps=n_layer, activation='relu')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -272,8 +271,8 @@ def run_training(hid_dim, n_layer, lr, save_dir, args):
 
 
 def hyperparameter_search(args):
-    n_layers_list = [2, 3, 4]
-    d_hidden_list = [32, 64, 128]
+    n_layers_list = [3] #[2, 3]
+    d_hidden_list = [32, 64]
     lr_list = [1e-3, 5e-3]
 
     results = []
@@ -380,23 +379,27 @@ def eval_pretrained_model(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--processed_dataset_path', type=pathlib.Path, \
-                        default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.1_graph_coarsen=False.pt', help='fine-grained data path')
+    parser.add_argument('--processed_train_path', type=pathlib.Path, \
+                        default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.1_graph_coarsen=False_train.pt', help='fine-grained train data path')
+    parser.add_argument('--processed_val_path', type=pathlib.Path, \
+                        default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.1_graph_coarsen=False_val.pt', help='fine-grained val data path')
+    parser.add_argument('--processed_test_path', type=pathlib.Path, \
+                        default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.1_graph_coarsen=False_test.pt', help='fine-grained test data path')
+    
     parser.add_argument('--processed_coarsen_dataset_path', type=pathlib.Path, \
                         default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.4_graph_coarsen=True.pt', help='coarsen data path')
     parser.add_argument('--output_dir', type=pathlib.Path, \
-                        default='/mnt/home/thuang/playground/velocity_prediction/GNN_search', help='hyper-param search path')
+                        default='/mnt/home/thuang/playground/velocity_prediction/GNN_search_3072', help='hyper-param search path')
     parser.add_argument('--HGNN_flag', action="store_true", help='if true: fit Hierarchical GNN')
-    parser.add_argument('--num_clouds', default=500, type=int, help="number of point clouds")
 
     parser.add_argument('--hid_dim', type=int, default=64, help='hidden dim')
     parser.add_argument('--n_layer', type=int, default=3, help='number of MP layers')
     parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
-    parser.add_argument('--num_epochs', type=int, default=300, help='number of epochs')
+    parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
 
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--search', action='store_true', help='Enable hyperparameter search')
-    group.add_argument('--eval_test', action='store_true', help='Eval on test set')
+    group.add_argument('--eval_test', action='store_true', help='Eval on test set only')
 
     args = parser.parse_args()
     print(args)
@@ -409,4 +412,6 @@ if __name__ == "__main__":
     else:
         save_dir = f"{args.output_dir}/hid={args.hid_dim}_layers={args.n_layer}_lr={args.lr:.4f}"      
         os.makedirs(save_dir, exist_ok=True)
-        run_training(hid_dim=args.hid_dim, n_layer=args.n_layer, lr=args.lr, save_dir=save_dir, args=args)
+        R2_best = run_training(args.processed_train_path, args.processed_val_path,
+                     hid_dim=args.hid_dim, n_layer=args.n_layer, lr=args.lr, save_dir=save_dir, args=args)
+        print(f"R2_val = {R2_best:.4f}")
