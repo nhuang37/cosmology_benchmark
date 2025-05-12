@@ -2,7 +2,7 @@ import numpy as np
 import random
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import scatter, mask_to_index, index_to_mask
-from torch_geometric.data import Data, DataLoader
+from torch_geometric.loader import DataLoader
 import torch
 import torch.nn as nn
 from torch.nn import Sequential as Seq, Linear as Lin, ReLU
@@ -11,15 +11,21 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
-from utils.tree_util import load_merged_h5_trees, split_dataloader, dataset_to_dataloader
-from models.model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, eval_and_plot, plot_train_val_loss
+from utils.tree_util import read_split_indices, split_dataloader, dataset_to_dataloader
+from models.model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, \
+    eval_and_plot, plot_train_val_loss, eval_model
+from models.model_velocity import count_parameters
+
 import argparse
 import pathlib
 import math
 import os
+import json
+import re
+import time 
 
 def plot_data_check(data, save_path):
-    feat = scatter_mean(data.x[:,0], data.x_batch, dim=0)
+    feat = scatter_mean(data.x[:,0], data.batch, dim=0)
     y = data.y[:,0]
     plt.scatter(y, feat, s=3)
     plt.savefig(save_path)
@@ -28,77 +34,66 @@ def plot_data_check(data, save_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--data_path', type=pathlib.Path, \
-    #                     default="datasets/merger_trees_1000_feat_1e13/merged_data.hdf5", help='data path')
+    parser.add_argument('--data_path', type=pathlib.Path, \
+                        default="/mnt/home/thuang/ceph/playground/datasets/merger_trees_1000_feat_1e13/SAM_trees", help='data path')
     parser.add_argument('--trainset_path', type=pathlib.Path, \
-                        default='/mnt/home/thuang/playground/datasets/pruned_trimmed_tree_small/pruned_trimmed_trainset_n=3_lh=600.pkl', help='training data path')
+                        default='/mnt/home/thuang/ceph/playground/datasets/SAM_trees/SAM_tree_train.pt', help='training data path')
     parser.add_argument('--valset_path', type=pathlib.Path, \
-                        default='/mnt/home/thuang/playground/datasets/pruned_trimmed_tree_small/pruned_trimmed_valset_n=3_lh=200.pkl', help='validation data path')
-    
+                        default='/mnt/home/thuang/ceph/playground/datasets/SAM_trees/SAM_tree_val.pt', help='validation data path')
+    parser.add_argument('--testset_path', type=pathlib.Path, \
+                        default='/mnt/home/thuang/ceph/playground/datasets/SAM_trees/SAM_tree_test.pt', help='test data path')
     parser.add_argument('--save_path', type=pathlib.Path, \
-                        default='tree_regression', help='model checkpoint dir')
+                        default='tree_regression_0509', help='model checkpoint dir')
 
     parser.add_argument('--model_type', type=str, default='MPNN', 
                         choices=['MPNN', 'MLPAgg', "DeepSet"], help='model type')
     parser.add_argument('--batch_size', type=int, default=128, help='batch size')
     parser.add_argument('--target_id', type=int, default=None, help='None: both; 0: omega_m; 1: sigma_8')
     parser.add_argument('--hid_dim', type=int, default=16, help='hidden dim')
-    parser.add_argument('--n_layer', type=int, default=1, help='number of MP layers')
+    parser.add_argument('--n_layer', type=int, default=5, help='number of MP layers')
 
     parser.add_argument('--lr', type=float, default=5e-3, help='learning rate')
     parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
 
-    parser.add_argument('--normalize_mode',type=str, default='identity',
-                        choices=["vmax_threshold","identity"], help='preprocess features: vmax - threshold at 20; mass - normalize by particle weight (roughly ~omega_m), or root particle masss')
+    # parser.add_argument('--normalize_mode',type=str, default='identity',
+    #                     choices=["vmax_threshold","identity"], help='preprocess features: vmax - threshold at 20; mass - normalize by particle weight (roughly ~omega_m), or root particle masss')
     parser.add_argument('--feat_idx', '--list', nargs='+', type=int, help='feature dimension: 0 - mass; 1 - concentration; 2-vmax')
-    parser.add_argument('--log_flag', action="store_true", help='normalize the node mass by taking log')
+    #parser.add_argument('--log_flag', action="store_true", help='normalize the node mass by taking log')
     parser.add_argument('--train_n_sample',type=int, default=3, help='number of training tree per LH label (to remove spurious correlation with labels); if -1 then use all trees')
-    parser.add_argument('--node_feature_mode',type=str, default='cosmo',
-                        choices=["cosmo","random","constant"], help='using cosmological features or uninformative node feature')
-    parser.add_argument('--prune_flag', action="store_true", help='if true: use the pruned dataset')
-    parser.add_argument('--trim_mass', action="store_false", help='default: use the trimmed dataset, where each tree is trimmed away of nodes with mass below threshold')
+    
+    # parser.add_argument('--node_feature_mode',type=str, default='cosmo',
+    #                     choices=["cosmo","random","constant"], help='using cosmological features or uninformative node feature')
+    # parser.add_argument('--prune_flag', action="store_true", help='if true: use the pruned dataset')
+    # parser.add_argument('--trim_mass', action="store_false", help='default: use the trimmed dataset, where each tree is trimmed away of nodes with mass below threshold')
     parser.add_argument('--subset_mode',type=str, default='full',
                         choices=["full","main_branch","leaves"], help='using full tree, main branch, or leaves only')
-    parser.add_argument('--log_mass_threshold',type=float, default=math.log10(3e10), help='subset nodes based on their mass (to remove spurious correlation with labels)')
-    parser.add_argument('--time_flag', action="store_true", help='if true: use time as node feature')
-    parser.add_argument('--no_mass_flag', action="store_true", help='if true: exclude mass as node feature')
+    #parser.add_argument('--log_mass_threshold',type=float, default=math.log10(3e10), help='subset nodes based on their mass (to remove spurious correlation with labels)')
+    #parser.add_argument('--time_flag', action="store_true", help='if true: use time as node feature')
+    #parser.add_argument('--no_mass_flag', action="store_true", help='if true: exclude mass as node feature')
+    parser.add_argument('--eval_test', action="store_true", help='if true: only eval model')
+    parser.add_argument('--eval_model_path',type=pathlib.Path, default=None, help='pretrained model path for eval')
 
     args = parser.parse_args()
     print(args)
+    ### full dataset with n_samples = 25
+    trainset = torch.load(args.trainset_path)
+    valset = torch.load(args.valset_path)
+    testset = torch.load(args.testset_path)
+    train_loader, val_loader, test_loader = dataset_to_dataloader(trainset, valset, testset,
+                                                                   batch_size=args.batch_size,
+                                                         normalize=True, time=True,
+                                                         no_mass =True, feat_idx=args.feat_idx)
 
-    # if args.prune_flag:
-    #     dataset = load_merged_h5_trees("datasets/prune_merger_trees_1000_feat_npart_cut5/merged_data.hdf5",
-    #                                    prune_flag=True,
-    #                                    normalize_mode=args.normalize_mode, feat_idx=args.feat_idx,
-    #                                    log_flag=True,
-    #                                    node_feature_mode=args.node_feature_mode,
-    #                                    subset_mode=args.subset_mode
-    #                                    )
-    # else:
-    #     dataset = load_merged_h5_trees(args.data_path, normalize_mode=args.normalize_mode, 
-    #                                feat_idx=args.feat_idx, log_flag=True,
-    #                                node_feature_mode=args.node_feature_mode,
-    #                                subset_mode=args.subset_mode)
-    
-    # if args.trim_mass:
-    #     print(f"cutting trees...")
-    #     dataset = cut_tree(dataset, log_mass_node_threshold=args.log_mass_threshold)
-        
-    # print(len(dataset))       # Total number of trees
-    # print(dataset[0].x.shape)
-
-    # #leaf_threshold = math.log10(args.leaf_threshold) if args.log_flag else args.leaf_threshold
-    # train_loader, val_loader, test_loader = split_dataloader(dataset, args.batch_size, 
+    # dataset = torch.load(f"{args.data_path}/prune_trim_dataset_nsample=25.pt")
+    # train_lhs, val_lhs, test_lhs = read_split_indices("/mnt/home/thuang/ceph/playground/datasets/merger_trees_1000_feat_1e13/SAM_trees/split_indices.txt")
+    # #TODO: integrate this to final data splits
+    # dataset = [data for data in dataset if data.x.shape[0] > 100]
+    # train_loader, val_loader, test_loader = split_dataloader(dataset, train_lhs, val_lhs, test_lhs,
     #                                                          train_n_sample=args.train_n_sample,
-    #                                                          normalize=True)
-    trainset = pickle.load(open(args.trainset_path, "rb"))
-    valset = pickle.load(open(args.valset_path, "rb"))
-    train_loader, val_loader, _ = dataset_to_dataloader(trainset, valset, batch_size=args.batch_size,
-                                                         normalize=True, time=args.time_flag,
-                                                         no_mass = args.no_mass_flag)
-    #prune_trim_testset = 
+    #                                                          time=True, no_mass=True,
+    #                                                          save_datasplit=True)
     batch = next(iter(train_loader))
-    print(batch.x[:10])
+    print(batch.x[:3])
 
     node_dim = batch.x.shape[1]
     out_dim = 1 if args.target_id is not None else 2
@@ -106,7 +101,7 @@ if __name__ == "__main__":
     mlp_only = False
     if args.model_type == 'MPNN':
     #model = TreeGINConv(node_dim,hid_dim, out_dim)
-        model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=0 )
+        model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True)
     # elif args.model_type == 'TreeMP':
     #     model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=30)
     elif args.model_type == 'MLPAgg':
@@ -117,30 +112,69 @@ if __name__ == "__main__":
         mlp_only = True
     else:
         raise NotImplementedError
+    
+    params = count_parameters(model)
+    print(f"model has {params} parameters!")
 
+    ##eval
+    if args.eval_test:
+        assert args.eval_model_path is not None, 'must pass in model weight path to run eval'
+        model.load_state_dict(torch.load(args.eval_model_path))
+        print(args.feat_idx)
+        _, _, test_loss, test_R2_om, test_R2_s8 = eval_model(model, test_loader, mlp_only, target_id=args.target_id)
+        print(f"test loss={test_loss:.4f}, test_R2_om={test_R2_om:.4f}, test_R2_s8={test_R2_s8:.4f}")
+        results_dict = {
+            'params': params,
+            'test_R2_om': test_R2_om.item(),
+            'test_R2_s8': test_R2_s8.item(),
+            'save_dir': str(args.eval_model_path)
+        }
+
+        test_result_path = os.path.join(args.eval_model_path.parent, "test_R2_result.json")
+        with open(test_result_path, 'w') as f:
+            json.dump(results_dict, f, indent=4)
+        print(f"Saved test evaluation results to: {test_result_path}")
     #model_name = f"{args.model_type}_target_{args.target_id}_norm={args.normalize_mode}_log={args.log_flag}_input={node_dim}_hid={args.hid_dim}_lr={args.lr}_ep={args.num_epochs}_bs={args.batch_size}_n={args.train_n_sample}_feat={args.node_feat_mode}"
 
-    model_name = (f"{args.model_type}_depth_{args.n_layer}_target_{args.target_id}"
-                f"_norm={args.normalize_mode}_log={args.log_flag}"
-                f"_input={node_dim}_hid={args.hid_dim}"
-                f"_lr={args.lr}_ep={args.num_epochs}"
-                f"_bs={args.batch_size}_n={args.train_n_sample}"
-                f"_feat={args.node_feature_mode}_masscut={args.log_mass_threshold}")
-               
-    #save_dir = f"trim_{args.save_path}/{model_name}" if args.trim_mass else f"{args.subset_mode}_{args.save_path}/{model_name}"
-    save_dir = f"trim_{args.save_path}/{args.subset_mode}/{model_name}" 
-    os.makedirs(save_dir, exist_ok=True)
-    plot_data_check(next(iter(train_loader)), f"{save_dir}/feat_check.png")
+
+    else: #TRAIN
+        model_name = (f"{args.model_type}_depth_{args.n_layer}_target_{args.target_id}"
+                    f"_input={node_dim}_hid={args.hid_dim}"
+                    f"_lr={args.lr}_ep={args.num_epochs}"
+                    f"_bs={args.batch_size}_n={args.train_n_sample}_feat={str(args.feat_idx)}")
+                
+        #save_dir = f"trim_{args.save_path}/{model_name}" if args.trim_mass else f"{args.subset_mode}_{args.save_path}/{model_name}"
+        save_dir = f"SAM_Trees/{args.subset_mode}/{model_name}" 
+        os.makedirs(save_dir, exist_ok=True)
+        plot_data_check(next(iter(train_loader)), f"{save_dir}/feat_check.png")
+        start_time = time.time()
+        train_loss_steps, val_loss_eps = train_eval_model(model, train_loader, val_loader, 
+                                                        mlp_only=mlp_only, n_epochs=args.num_epochs,
+                                                        lr=args.lr, target_id=args.target_id, 
+                                                        save_path=f'{save_dir}/model.pt')
+        end_time = time.time()
+        print(f"finish training, used {(end_time - start_time):.4f} sec!")
+        train_loss, val_loss = eval_and_plot(model, train_loader, val_loader, target_id=args.target_id, 
+                mlp_only=mlp_only, model_name=model_name, fig_path=f"{save_dir}/pred.png")
+        
+        results = {'train_steps': train_loss_steps, 'val': val_loss_eps}
+        plot_train_val_loss(results, save_path= f"{save_dir}/results.png")
+
+        ##Testing
+        _, _, test_loss, test_R2_om, test_R2_s8 = eval_model(model, test_loader, mlp_only, target_id=args.target_id)
+        print(f"test loss={test_loss:.4f}, test_R2_om={test_R2_om:.4f}, test_R2_s8={test_R2_s8:.4f}")
+        results['test_loss'] = test_loss 
+        pickle.dump(results, open(f"{save_dir}/results.pkl", 'wb'))
+        results_dict = {
+            'params': params,
+            'test_R2_om': test_R2_om.item(),
+            'test_R2_s8': test_R2_s8.item(),
+            'save_dir': str(args.eval_model_path)
+        }
+
+        test_result_path = os.path.join(save_dir, "test_R2_result.json")
+        with open(test_result_path, 'w') as f:
+            json.dump(results_dict, f, indent=4)
+        print(f"Saved test evaluation results to: {test_result_path}")
 
 
-    train_loss_steps, val_loss_eps = train_eval_model(model, train_loader, val_loader, 
-                                                      mlp_only=mlp_only, n_epochs=args.num_epochs,
-                                                      lr=args.lr, target_id=args.target_id, 
-                                                      save_path=f'{save_dir}/model.pt')
-
-    train_loss, val_loss = eval_and_plot(model, train_loader, val_loader, target_id=args.target_id, 
-              mlp_only=mlp_only, model_name=model_name, fig_path=f"{save_dir}/pred.png")
-    
-    results = {'train_steps': train_loss_steps, 'val': val_loss_eps}
-    plot_train_val_loss(results, save_path= f"{save_dir}/results.png")
-    pickle.dump(results, open(f"{save_dir}/results.pkl", 'wb'))

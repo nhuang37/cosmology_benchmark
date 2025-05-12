@@ -13,10 +13,13 @@ from torch.nn.functional import one_hot
 from torch_geometric.nn.aggr import DeepSetsAggregation
 
 class TreeConv(MessagePassing):
-    def __init__(self, loop_flag=True):
+    def __init__(self, node_dim, hid_dim, out_dim, loop_flag=True):
         #Simple linear graph conv, without learnable params here
         super(TreeConv, self).__init__()
         self.loop_flag = loop_flag
+        self.nn = Seq(Lin(node_dim, hid_dim), 
+                            ReLU(), 
+                            Lin(hid_dim, out_dim))
 
     def forward(self, x, edge_index):
         h = x
@@ -26,16 +29,17 @@ class TreeConv(MessagePassing):
             h = self.propagate(edge_index=edge_loops, x=h)
         else:
             h = self.propagate(edge_index=edge_index, x=h)
-        return h
+        return self.nn(h)
 
 
 class TreeNodeClassifier(nn.Module):
     def __init__(self, node_dim, hid_dim, out_dim, n_layer=1, loop_flag=True):
         super(TreeNodeClassifier, self).__init__()
-        self.conv_layers = nn.ModuleList([TreeConv(loop_flag)])
+        self.conv_layers = nn.ModuleList([TreeConv(node_dim, hid_dim, hid_dim, loop_flag)])
         for layer in range(n_layer - 1):
-            self.conv_layers.append(TreeConv(loop_flag))
-        self.classifier = Seq(Lin(node_dim, hid_dim), 
+            self.conv_layers.append(TreeConv(hid_dim, hid_dim, hid_dim, loop_flag))
+
+        self.classifier = Seq(Lin(hid_dim, hid_dim), 
                               ReLU(), 
                               Lin(hid_dim, out_dim)) 
 
@@ -84,8 +88,8 @@ def train_eval_classifier(model, data_list, save_dir,
     for epoch in range(num_epochs):
         ep_loss = 0
         model.train()  # Set model to training mode
-        optimizer.zero_grad()  # Clear gradients from the previous step
         for data in data_list:
+            optimizer.zero_grad()  # Clear gradients from the previous step
             # Forward pass - full batch
             out = model(data.x.to(device), data.edge_index.to(device))
             pred = out[data.vn_train_idx]
