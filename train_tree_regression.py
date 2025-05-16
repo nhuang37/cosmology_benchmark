@@ -23,6 +23,22 @@ import os
 import json
 import re
 import time 
+from sklearn.metrics import r2_score
+
+def bootstrap_r2(y_true, y_pred, n_bootstrap=1000, seed=None):
+    rng = np.random.default_rng(seed)
+    n_samples = len(y_true)
+    r2_values = []
+
+    for _ in range(n_bootstrap):
+        indices = rng.choice(n_samples, size=n_samples, replace=True)
+        r2 = r2_score(y_true[indices], y_pred[indices])
+        r2_values.append(r2)
+
+    r2_values = np.array(r2_values)
+    mean_r2 = np.mean(r2_values)
+    std_r2 = np.std(r2_values)
+    return mean_r2, std_r2
 
 def plot_data_check(data, save_path):
     feat = scatter_mean(data.x[:,0], data.batch, dim=0)
@@ -61,15 +77,8 @@ if __name__ == "__main__":
     #parser.add_argument('--log_flag', action="store_true", help='normalize the node mass by taking log')
     parser.add_argument('--train_n_sample',type=int, default=3, help='number of training tree per LH label (to remove spurious correlation with labels); if -1 then use all trees')
     
-    # parser.add_argument('--node_feature_mode',type=str, default='cosmo',
-    #                     choices=["cosmo","random","constant"], help='using cosmological features or uninformative node feature')
-    # parser.add_argument('--prune_flag', action="store_true", help='if true: use the pruned dataset')
-    # parser.add_argument('--trim_mass', action="store_false", help='default: use the trimmed dataset, where each tree is trimmed away of nodes with mass below threshold')
     parser.add_argument('--subset_mode',type=str, default='full',
                         choices=["full","main_branch","leaves"], help='using full tree, main branch, or leaves only')
-    #parser.add_argument('--log_mass_threshold',type=float, default=math.log10(3e10), help='subset nodes based on their mass (to remove spurious correlation with labels)')
-    #parser.add_argument('--time_flag', action="store_true", help='if true: use time as node feature')
-    #parser.add_argument('--no_mass_flag', action="store_true", help='if true: exclude mass as node feature')
     parser.add_argument('--eval_test', action="store_true", help='if true: only eval model')
     parser.add_argument('--eval_model_path',type=pathlib.Path, default=None, help='pretrained model path for eval')
 
@@ -84,14 +93,6 @@ if __name__ == "__main__":
                                                          normalize=True, time=True,
                                                          no_mass =True, feat_idx=args.feat_idx)
 
-    # dataset = torch.load(f"{args.data_path}/prune_trim_dataset_nsample=25.pt")
-    # train_lhs, val_lhs, test_lhs = read_split_indices("/mnt/home/thuang/ceph/playground/datasets/merger_trees_1000_feat_1e13/SAM_trees/split_indices.txt")
-    # #TODO: integrate this to final data splits
-    # dataset = [data for data in dataset if data.x.shape[0] > 100]
-    # train_loader, val_loader, test_loader = split_dataloader(dataset, train_lhs, val_lhs, test_lhs,
-    #                                                          train_n_sample=args.train_n_sample,
-    #                                                          time=True, no_mass=True,
-    #                                                          save_datasplit=True)
     batch = next(iter(train_loader))
     print(batch.x[:3])
 
@@ -100,10 +101,7 @@ if __name__ == "__main__":
     
     mlp_only = False
     if args.model_type == 'MPNN':
-    #model = TreeGINConv(node_dim,hid_dim, out_dim)
         model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True)
-    # elif args.model_type == 'TreeMP':
-    #     model = TreeRegressor(node_dim, args.hid_dim, out_dim, args.n_layer, loop_flag=True, cut=30)
     elif args.model_type == 'MLPAgg':
         model = MLPAgg(node_dim, args.hid_dim, out_dim)
         mlp_only = True
@@ -121,20 +119,29 @@ if __name__ == "__main__":
         assert args.eval_model_path is not None, 'must pass in model weight path to run eval'
         model.load_state_dict(torch.load(args.eval_model_path))
         print(args.feat_idx)
-        _, _, test_loss, test_R2_om, test_R2_s8 = eval_model(model, test_loader, mlp_only, target_id=args.target_id)
+        target, pred, test_loss, test_R2_om, test_R2_s8 = eval_model(model, test_loader, mlp_only, target_id=args.target_id)
+        target = target.numpy()
+        pred = pred.numpy()
+        print(target.shape, pred.shape)
+        r2_om, r2_om_std = bootstrap_r2(target[:,0], pred[:,0], n_bootstrap=100)
+        r2_s8, r2_s8_std = bootstrap_r2(target[:,1], pred[:,1], n_bootstrap=100)
+
         print(f"test loss={test_loss:.4f}, test_R2_om={test_R2_om:.4f}, test_R2_s8={test_R2_s8:.4f}")
         results_dict = {
             'params': params,
             'test_R2_om': test_R2_om.item(),
             'test_R2_s8': test_R2_s8.item(),
-            'save_dir': str(args.eval_model_path)
+            'save_dir': str(args.eval_model_path),
+            'test_R2_om_boot': r2_om,
+            'test_R2_om_boot_std': r2_om_std,
+            'test_R2_s8_boot': r2_s8,
+            'test_R2_s8_boot_std': r2_s8_std,
         }
 
         test_result_path = os.path.join(args.eval_model_path.parent, "test_R2_result.json")
         with open(test_result_path, 'w') as f:
             json.dump(results_dict, f, indent=4)
         print(f"Saved test evaluation results to: {test_result_path}")
-    #model_name = f"{args.model_type}_target_{args.target_id}_norm={args.normalize_mode}_log={args.log_flag}_input={node_dim}_hid={args.hid_dim}_lr={args.lr}_ep={args.num_epochs}_bs={args.batch_size}_n={args.train_n_sample}_feat={args.node_feat_mode}"
 
 
     else: #TRAIN

@@ -12,6 +12,8 @@ import copy
 from torch.nn.functional import one_hot
 from torch_geometric.nn.aggr import DeepSetsAggregation
 
+
+
 def MSE_loss(ypred, y):
     return torch.mean((ypred - y)**2)
 
@@ -39,35 +41,6 @@ class TreeGINConv(MessagePassing):
             h = self.propagate(edge_index=edge_index, x=h)
         h = self.nn(h) #wait till all nodes are transformed!
         return h
-
-    
-    # def get_orders(self, pos, cut):
-    #     mask_cut = (pos > cut).bool().squeeze()
-    #     return [mask_cut, ~mask_cut] 
-
-    # def forward(self, x, edge_index, pos):
-    #     h = x
-    #     if self.loop_flag:
-    #         self_loops = torch.arange(x.shape[0]).repeat(2,1).to(x.device)
-    #     if self.cut > 0:
-    #         orders = self.get_orders(pos, self.cut)
-    #     else:
-    #         orders = [torch.ones(x.shape[0]).bool().to(x.device)]
-
-    #     for node_mask in orders:
-    #         source_node_idx = mask_to_index(node_mask)
-    #         edge_subset_mask = torch.isin(edge_index[0], source_node_idx)
-    #         subedge_index = edge_index[:,edge_subset_mask]
-    #         if self.loop_flag:
-    #             subedge_loops = torch.cat([subedge_index, self_loops], dim=1)
-    #             h = self.propagate(edge_index=subedge_loops, x=h)
-    #         else:
-    #             h = self.propagate(edge_index=subedge_index, x=h)
-        
-    #     h = self.nn(h) #wait till all nodes are transformed!
-    #     #print(h.shape)
-    #         #print(h)
-    #     return h
     
 class TreeRegressor(nn.Module):
     def __init__(self, node_dim, hid_dim, out_dim, n_layer=1, loop_flag=True, 
@@ -241,43 +214,6 @@ def eval_model(model, eval_loader,
         R2 = 1 - mse/var
 
         return target, pred_all, loss_avg, R2
-
-# def train_model(model, train_loader, mlp_only=False,
-#                 n_epochs=100, lr=1e-2, target_id=1, save_path=None):
-#     criterion = nn.L1Loss(reduction='mean') #nn.MSELoss() #
-#     optimizer = optim.AdamW(model.parameters(), lr=lr)
-#     step = 0
-#     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-#     model = model.to(device)
-#     model.train()
-#     loss_hist = []
-#     for i in range(n_epochs):
-#         loss_ep = 0
-#         #for data in data_list:
-#         for data in train_loader:
-#             data = data.to(device)
-#             if mlp_only:
-#                 om_pred = model(data.x, data.x_batch)
-#             else:
-#                 #orders = [torch.ones(x.shape[0]).bool().to(device)]
-#                 om_pred = model(data.x, data.edge_index, data.pos, data.x_batch) 
-#             #om_pred = scatter_mean(om_pred_node, data.x_batch, dim=0)
-#             #print(om_pred, data.y.float())
-#             loss = criterion(om_pred, data.y[:,target_id].unsqueeze(1).float()) #predicting omega_matter
-#             #loss_hist.append(loss.item())
-#             loss_ep += loss.item()
-#             optimizer.zero_grad()
-#             loss.backward()
-#             optimizer.step()
-#             step +=1
-#         loss_avg = loss_ep/len(train_loader)
-#         loss_hist.append(loss_avg)
-#         if (i+1) % 10 == 0:
-#             print(f'epoch={i}, loss={loss_avg:.4f}')
-#     if save_path is not None:
-#         torch.save(model.state_dict(), save_path)
-#     return loss_hist
-    
 
 def plot_result(train_target, train_pred, train_loss, 
                 val_target, val_pred, val_loss, val_R2_om, val_R2_s8,

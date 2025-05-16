@@ -84,12 +84,11 @@ def build_graph(pos, r_link=90, L=1000, leafsize=16, epsilon=0.00001, multi_edge
     row, col = edge_index[:,0], edge_index[:,1]
     
     #edge feature as wrapped-around distance, 
-    d_L = pbc_distance(pos[row], pos[col], L, r_link)
-    
-    # edge feature as squared Distance
     if multi_edge_feat:
-        edge_dist = (pos[row] - pos[col])/r_link #d_L**2 #(E,3) TODO-CHECK
+        d_L = pbc_distance(pos[row], pos[col], L, r_link, norm=False)
+        edge_dist = d_L /r_link #(E,3) TODO-CHECK/compare w/ (pos[row] - pos[col])
     else:
+        d_L = pbc_distance(pos[row], pos[col], L, r_link, norm=True)
         edge_dist = np.linalg.norm(d_L, axis=1)/r_link
 
     return edge_index, edge_dist
@@ -111,14 +110,14 @@ def split_dataloader(dataset, batch_size=2000, shuffle=True):
 
 
 def mapH5_to_PyGData(g, labels=None, 
-                     edge_flag=True, mode='BSQ', predict_velocity=True, 
+                     edge_flag=True, prefix='Quijote', predict_velocity=True, 
                      r_ratio=0.4, leafsize=16, epsilon=0.00001,
-                     coarsen=True):
+                     coarsen=True, g_name=None):
     '''
     input: g: dataset in the H5 file, storing point clouds 
     return PyG.Data'''
-    L_dict = {'BSQ': 1000, 'CAMELS-SAM': 100, 'CAMELS': 25}
-    L = L_dict[mode]
+    period_dict = {'Quijote': 1000, 'CAMELS-SAM': 100, 'CAMELS-TNG': 25, 'fiducial': 1000}
+    L= period_dict[prefix]
     r_link = r_ratio*L
 
     # Extract input node features
@@ -144,6 +143,9 @@ def mapH5_to_PyGData(g, labels=None,
         
     # create edges based on position
     if edge_flag:
+        if not np.all((pos >= 0) & (pos < L)):
+            print(f"positions have negative values at cloud idx={g_name}, wrapping around...")
+            pos = pos % L
         edge_index, edge_dist = build_graph(pos, 
                                             r_link=r_link, 
                                             L=L, leafsize=leafsize, 
@@ -162,8 +164,8 @@ def mapH5_to_PyGData(g, labels=None,
 
 
 def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
-                         predict_velocity=True, data_name='BSQ', subset_ids=list(range(3072)),
-                         r_ratio=0.4, leafsize=16, epsilon=0.00001, coarsen=True):
+                         predict_velocity=True, data_name='BSQ', prefix='Quijote', subset_ids=None,
+                         r_ratio=0.4, leafsize=16, epsilon=0.00001, coarsen=True, mode='train'):
     ''' 
     Load the h5 file where groups (i.e. point clouds) contain (halo) point features (e.g., position, mass), 
     if predict_velocity == False:
@@ -179,11 +181,11 @@ def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
         labels = f["params"]
         if subset_ids is not None:
             for key in subset_ids:
-                graph_name = f"BSQ_{key}"
+                graph_name = f"{data_name}_{key}"
                 g = group[graph_name]
                 data = mapH5_to_PyGData(g, labels, r_ratio=r_ratio, 
-                     edge_flag=edge_flag, mode=data_name, predict_velocity=predict_velocity, 
-                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen)
+                     edge_flag=edge_flag, prefix=prefix, predict_velocity=predict_velocity, 
+                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen, g_name=graph_name)
                 data_list.append(data)
                 count += 1
                 # time
@@ -195,9 +197,9 @@ def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
         else:
             for graph_name in group:
                 g = group[graph_name] #of the form '/BSQ/BSQ_0'
-                data = mapH5_to_PyGData(g, labels, r_ratio=r_ratio,
-                     edge_flag=edge_flag, mode=data_name, predict_velocity=predict_velocity, 
-                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen)
+                data = mapH5_to_PyGData(g, labels, r_ratio=r_ratio, 
+                     edge_flag=edge_flag, prefix=prefix, predict_velocity=predict_velocity, 
+                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen, g_name=graph_name)
                 data_list.append(data)
                 count += 1
                 # time
@@ -205,10 +207,8 @@ def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
                 duration = end - start
                 if count % 100 == 0:
                     print(f"processed {count} number of clouds! used {duration:.4f}")
-    output_file = f'{output_dir}/Rc={r_ratio}_graph_coarsen={coarsen}_start={subset_ids[0]}_end={subset_ids[-1]}.pt'
-    #output_file = f'{output_dir}/Rc={r_ratio}_graph.pt'
-    torch.save(data_list, output_file)
-    #return data_list
+    return data_list
+
 
     
 
@@ -222,20 +222,52 @@ if __name__ == '__main__':
     parser.add_argument('--output_dir', #default='/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5',
                         default='/mnt/home/thuang/ceph/playground/datasets/point_clouds',
                          help='save path')
-    parser.add_argument('--velocity_flag', action="store_true", help='if true: predict velocity')
+    #parser.add_argument('--velocity_flag', action="store_true", help='if true: predict velocity')
     parser.add_argument('--coarsen_flag', action="store_true", help='if true: build coarsen graph')
     parser.add_argument('--r_ratio', default=0.1, type=float, help='linkage r_ratio (over a normalized box length 1.0)')
-    parser.add_argument('--start_idx', default=500, type=int,help='starting point cloud idx')
-    parser.add_argument('--end_idx', default=1000, type=int,help='ending point cloud idx')
+    parser.add_argument('--start_idx', default=0, type=int,help='starting point cloud idx')
+    parser.add_argument('--end_idx', default=2048, type=int,help='ending point cloud idx')
+    parser.add_argument('--mode', default="train", type=str,help='split')
+    parser.add_argument('--presplit_flag', action="store_true", help='if true: preprocess the splitted h5 files')
 
     #the same script applies to position_only and position_velocity point clouds, 
     # as we only use position features to construct the graph
 
     args = parser.parse_args()
     print(args)
-    subset_ids = list(range(args.start_idx, args.end_idx))
-    dataset = build_PyGdata_fromH5(args.h5_path, args.output_dir, 
-                                   predict_velocity=True, data_name=args.data_name, 
-                                   subset_ids=subset_ids,
-                                   r_ratio=args.r_ratio, 
-                                   coarsen=args.coarsen_flag)
+    main_path = args.h5_path.split('.')[0]
+    filename = main_path.split('/')[-1]             # Get the file name
+    prefix = filename.split('_')[0]            # Extract 'CAMELS-SAM'
+    print(prefix)
+    if args.presplit_flag:
+        train_path = f"{main_path}_train.hdf5"
+        val_path = f"{main_path}_val.hdf5"
+        test_path = f"{main_path}_test.hdf5"
+        name_dict = {'Quijote': 'BSQ', 'CAMELS-SAM': 'LH', 'CAMELS-TNG': 'LH'}
+
+        for mode, path in zip(["train", "val", "test"], [train_path, val_path, test_path]):
+            print(f"building {mode} dataset...")
+            data_list = build_PyGdata_fromH5(path, args.output_dir, 
+                                        predict_velocity=True, 
+                                        data_name=name_dict[prefix],
+                                        prefix=prefix, 
+                                        r_ratio=args.r_ratio, 
+                                        coarsen=args.coarsen_flag,
+                                        mode=mode)
+            
+            output_file = f'{args.output_dir}/{prefix}_Rc={args.r_ratio}_graph_coarsen={args.coarsen_flag}_{mode}.pt'
+            torch.save(data_list, output_file)
+
+    else:
+        subset_ids = list(range(args.start_idx, args.end_idx))
+        data_list = build_PyGdata_fromH5(args.h5_path, args.output_dir, 
+                                    predict_velocity=True, 
+                                    data_name=args.data_name, 
+                                    prefix=prefix, 
+                                    subset_ids=subset_ids,
+                                    r_ratio=args.r_ratio, 
+                                    coarsen=args.coarsen_flag,
+                                    mode=args.mode)
+        output_file = f'{args.output_dir}/{prefix}_Rc={args.r_ratio}_graph_coarsen={args.coarsen_flag}_{args.mode}_start={args.start_idx}_end={args.end_idx}.pt'
+        torch.save(data_list, output_file)
+        

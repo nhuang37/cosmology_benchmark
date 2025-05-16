@@ -21,6 +21,7 @@ import copy
 import math
 from collections import defaultdict
 import pickle
+import ast
 
 seed = 999
 random.seed(seed)
@@ -103,27 +104,6 @@ def trim_tree(data, log_mass_node_threshold=math.log10(3e10), connect_trim=True)
 # test_data.lh_id = 0
 # trim_test_data = trim_tree(test_data, 3.0, connect_trim=True)
 # trim_test_data.x
-
-# def cut_tree(dataset, log_mass_threshold=13, log_mass_node_threshold=math.log10(3e10), connected_flag=False):
-#     trim_subset = [trim_tree(data, log_mass_node_threshold) for data in dataset]
-#     sizes_original = np.array([data.x.shape[0] for data in dataset])
-#     sizes_trim = np.array([data.x.shape[0] for data in trim_subset])
-#     print(f"finish trimming: average original size = {sizes_original.mean():.4f}, average trim size = {sizes_trim.mean():.4f}")
-#     if not connected_flag:
-#         return trim_subset
-
-#     else:
-#     #step 3 select the largest component only, and retain the trees where the largest component contains the root node (i.e. time == 1)
-#     #connected_trim_subset = [data for data in trim_subset if is_connected(data, directed=True)]
-#         lc_transform =  T.LargestConnectedComponents()
-#         lc_trim_subset = [lc_transform(data) for data in trim_subset]
-#         root_lc_trim_subset = [data for data in lc_trim_subset if data.x[0,-1].item() == 1.0]
-#         sizes_lc = np.array([data.x.shape[0] for data in root_lc_trim_subset])
-
-#         print(f"finish selecting {len(root_lc_trim_subset)} trees! average connected component size = {sizes_lc.mean():.4f}")
-
-#         return root_lc_trim_subset 
-
 
 def find_leaf_nodes(data: Data):
     """ 
@@ -248,19 +228,6 @@ def get_subset(data, mode='prune', log_mass_node_threshold=math.log10(3e10)):
                         lh_id=data.lh_id)
         return subset_data
    
-            # subset_leaf_idx = find_leaf_nodes(subset_data)
-            # subset_data['leaf_idx'] = subset_leaf_idx
-
-        # else:
-        #     subset_data = copy.deepcopy(data)
-        #     subset_data['edge_index'] = None
-        #     subset_data['pos'] = None
-        #     if mode == 'root':
-        #         subset_data['x'] = subset_data['x'][0, :].unsqueeze(0)
-        #     elif mode == 'leaf':
-        #         subset_data['x'] = subset_data['x'][-1, :].unsqueeze(0)
-        #     else:
-        #         raise NotImplementedError
     
 
 def select_tree_per_LH(sample_lh, lh_id, train_n_sample=-1, seed=0):
@@ -272,62 +239,95 @@ def select_tree_per_LH(sample_lh, lh_id, train_n_sample=-1, seed=0):
         rand_idx = np.where(sample_lh == lh_id)[0]
     return rand_idx
 
-def normalize_data_all(data_list, mean, std, time=False, no_mass=False):
-    if no_mass:
-        mean = mean[1:]
-        std = std[1:]
-
+def subset_data_features(data_list, feat_idx=[0,1,2,3]):
     for data in data_list:
-        if no_mass:
-            #print("excluding mass")
-            data.x = data.x[:,1:] #(exclude mass in the first dimen)
+        data.x = data.x[:,feat_idx]
+    return data_list
 
+
+def normalize_data_all(data_list, mean, std, time=False):
+    for data in data_list:
         if time:
-            data.x[:,:-1] = (data.x[:,:-1] - mean)/std  #(n, d)
+            if mean.shape[0] > 1:
+                data.x[:,:-1] = (data.x[:,:-1] - mean[:-1]) / std[:-1]
+            else: 
+                pass
         else:
-            data.x = (data.x[:,:-1] - mean)/std  #(n, d-1)
+            data.x = (data.x - mean)/std 
+
     return data_list
 
 def dataset_to_dataloader(dataset_train, dataset_val, dataset_test=None, 
-                          batch_size=128, shuffle=True, normalize=True, time=False, no_mass=False):
+                          batch_size=128, shuffle=True, normalize=True, 
+                          time=False, no_mass=False, feat_idx=None):
     ''' 
     given pre-splitted datasets (train/val/test), construct dataloaders with optional preprocessing
     '''
+    if feat_idx is not None:
+        dataset_train = subset_data_features(dataset_train, feat_idx)
+        dataset_val = subset_data_features(dataset_val, feat_idx)
+        dataset_test = subset_data_features(dataset_test, feat_idx)
+
     if normalize:
         print(f"normalizing for mean 0 , std 1 across all trees!")
         all_train_x = torch.cat([data.x for data in dataset_train], dim=0)
         #do not normalize the time feature stored as the last dimension
-        mean_x, std_x = all_train_x[:,:-1].mean(dim=0), all_train_x[:,:-1].std(dim=0)
-        dataset_train = normalize_data_all(dataset_train, mean_x, std_x, time, no_mass)
-        dataset_val = normalize_data_all(dataset_val, mean_x, std_x, time, no_mass)
+        mean_x, std_x = all_train_x.mean(dim=0), all_train_x.std(dim=0)
+        time_flag = True if 3 in feat_idx else False
+        dataset_train = normalize_data_all(dataset_train, mean_x, std_x, time=time_flag)
+        dataset_val = normalize_data_all(dataset_val, mean_x, std_x, time=time_flag)
         if dataset_test is not None:
-            dataset_test = normalize_data_all(dataset_test, mean_x, std_x)
+            dataset_test = normalize_data_all(dataset_test, mean_x, std_x, time=time_flag)
     test_size = len(dataset_test) if dataset_test is not None else 0
 
     print(f'train_size={len(dataset_train)}, val_size={len(dataset_val)}, test_size={test_size}')
     print(f'sampled train data view = {dataset_train[0]}')
-    train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle, follow_batch=['x'])
-    val_loader = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+    train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle)
+    val_loader = DataLoader(dataset_val, batch_size=batch_size, shuffle=False)
     if dataset_test is not None:
-        test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+        test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False)
         return train_loader, val_loader, test_loader
     else:
         return train_loader, val_loader, None
 
+def read_split_indices(filename):
+    """
+    Reads a split_indices.txt file written by `write_split_indices` and returns
+    train, val, and test LH ID lists.
 
-def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, val_ratio=0.2, seed=0, 
-                     train_n_sample=1, normalize=True, eps=1e-8):
+    Args:
+        filename (str): Path to the split_indices.txt file
+
+    Returns:
+        tuple: (train_lhs, val_lhs, test_lhs) – each is a list of LH string IDs
+    """
+    with open(filename, "r") as f:
+        lines = f.readlines()
+
+    train_lhs = ast.literal_eval(lines[1].strip())  # line after 'Train Indices'
+    val_lhs   = ast.literal_eval(lines[4].strip())  # line after 'Validation Indices'
+    test_lhs  = ast.literal_eval(lines[7].strip())  # line after 'Test Indices'
+
+    return train_lhs, val_lhs, test_lhs
+
+def split_dataloader(dataset, train_lh_ids, val_lh_ids, test_lh_ids,
+                     batch_size=128, shuffle=True, 
+                     seed=0, 
+                     train_n_sample=1, normalize=True, eps=1e-8, 
+                     feat_idx=[0,1,2,3], time=False, no_mass=False,
+                     save_datasplit=False):
     ''' 
     60/20/20 train/val/test split based on disjoint cosmo (note: y cosmo is arranged in random order!)
     '''
     sample_lh = np.array([data.lh_id for data in dataset])
-    values, count = np.unique(sample_lh, return_counts=True)
-    split_train = int(len(values) * train_ratio)
-    split_val = int(len(values) * (train_ratio+val_ratio))
-    train_lh_ids = values[:split_train]
-    val_lh_ids = values[split_train:split_val]
-    test_lh_ids = values[split_val:]
+    # values, count = np.unique(sample_lh, return_counts=True)
+    # split_train = int(len(values) * train_ratio)
+    # split_val = int(len(values) * (train_ratio+val_ratio))
+    # train_lh_ids = values[:split_train]
+    # val_lh_ids = values[split_train:split_val]
+    # test_lh_ids = values[split_val:]
     idx_train, idx_val, idx_test = [], [], []
+
     for lh_id in train_lh_ids:
         selected_idx = select_tree_per_LH(sample_lh, lh_id, train_n_sample, seed=seed)
         idx_train.extend(selected_idx)
@@ -338,27 +338,29 @@ def split_dataloader(dataset, batch_size=128, shuffle=True, train_ratio=0.6, val
         selected_idx = select_tree_per_LH(sample_lh, lh_id, train_n_sample, seed=seed)
         idx_test.extend(selected_idx)
 
-    # if subset_flag:
-    #     dataset_train = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_train]
-    #     dataset_val = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_val] 
-    #     dataset_test = [get_subset(dataset[i], mode, leaf_threshold) for i in idx_test] 
-    # else:
+    if feat_idx is not None:
+        dataset = subset_data_features(dataset, feat_idx)
     dataset_train = [dataset[i] for i in idx_train]
     dataset_val = [dataset[i] for i in idx_val]
     dataset_test =  [dataset[i] for i in idx_test]
+    if save_datasplit:
+        torch.save(dataset_train, "/mnt/home/rstiskalek/ceph/graps4science/SAM_tree_train.pt")
+        torch.save(dataset_val, "/mnt/home/rstiskalek/ceph/graps4science/SAM_tree_val.pt")
+        torch.save(dataset_test, "/mnt/home/rstiskalek/ceph/graps4science/SAM_tree_test.pt")
+
     if normalize:
         print(f"normalizing for mean 0 , std 1 across all trees!")
         all_train_x = torch.cat([data.x for data in dataset_train], dim=0)
-        mean_x, std_x = all_train_x.mean(dim=0), all_train_x.std(dim=0)
-        dataset_train = normalize_data_all(dataset_train, mean_x, std_x)
-        dataset_val = normalize_data_all(dataset_val, mean_x, std_x)
-        dataset_test = normalize_data_all(dataset_test, mean_x, std_x)
+        mean_x, std_x = all_train_x[:,:-1].mean(dim=0), all_train_x[:,:-1].std(dim=0)
+        dataset_train = normalize_data_all(dataset_train, mean_x, std_x, time, no_mass)
+        dataset_val = normalize_data_all(dataset_val, mean_x, std_x, time, no_mass)
+        dataset_test = normalize_data_all(dataset_test, mean_x, std_x, time, no_mass)
 
     print(f'train_size={len(dataset_train)}, val_size={len(dataset_val)}, test_size={len(dataset_test)}')
     print(f'sampled train data view = {dataset_train[0]}')
-    train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle, follow_batch=['x'])
-    val_loader = DataLoader(dataset_val, batch_size=batch_size, shuffle=False, follow_batch=['x'])
-    test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False, follow_batch=['x'])
+    train_loader = DataLoader(dataset_train, batch_size=batch_size, shuffle=shuffle)
+    val_loader = DataLoader(dataset_val, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(dataset_test, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader
 

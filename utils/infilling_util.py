@@ -13,6 +13,8 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
+import ast
+
 
 def exclude_topk_mask_1d(tensor, k):
     """
@@ -93,11 +95,14 @@ def subset_up_to_decimals(tensor, subset_value, decimals=2):
   return torch.isin(rounded_tensor, rounded_value)
 
 def find_parent_node(edge_index, child_node):
-    child_nodes = edge_index[0]
-    parent_nodes = edge_index[1]
+    child_nodes = edge_index[0] #ancestor node
+    parent_nodes = edge_index[1] #more recent node
     return parent_nodes[child_nodes == child_node].item() 
 
 def find_merger_nodes(tree):
+    ''' 
+    only hold for binary merger tree!
+    '''
     child_nodes = tree.edge_index[0]
     parent_nodes = tree.edge_index[1]
     num_nodes = tree.x.shape[0]
@@ -188,11 +193,10 @@ def coarse_grain_tree(data: Data, subset_times: torch.tensor) -> Data:
 
     return data_new, drop_merger_dict
 
-def log_norm_standardize(x):
-    x_log = torch.log10(x)
-    mean = x_log.mean(dim=0)
-    std = x_log.std(dim=0)
-    return (x_log - mean)/std
+def standardize(x):
+    mean = x.mean(dim=0)
+    std = x.std(dim=0)
+    return (x - mean)/std, mean, std
 
 def compute_kept_times(largest_tree, k=2):
     time_steps = torch.unique(largest_tree.x[:,-1])
@@ -217,13 +221,15 @@ def build_infill_tree(data, kept_times, verbose=False):
     merger_nodes = find_merger_nodes(infill_tree)
     num_merger_nodes = len(merger_nodes)
     # standardize data here
-    infill_tree.x[:,:-1] = log_norm_standardize(infill_tree.x[:,:-1])
+    infill_tree.x[:,:-1] , mean, std = standardize(infill_tree.x[:,:-1])
     if verbose:
         print(f"found {num_merger_nodes} merger nodes out of {num_nodes} nodes")
         print(f"features x = {infill_tree.x[0]}")
     #step 5: add virtual nodes and edges
     d = infill_tree.x.shape[1]
     infill_tree.x = torch.cat([infill_tree.x, torch.zeros(num_merger_nodes, d)])
+    infill_tree.x_mean_excl_time = mean 
+    infill_tree.x_std_excl_time = std
     infill_tree.label = -1 * torch.ones(num_nodes+num_merger_nodes).long() #ignore non-virtual nodes by setting ignore_index = -1
     infill_tree.vn_mask = torch.BoolTensor([False]* (num_nodes+num_merger_nodes))
     for i, merger_node in enumerate(merger_nodes):
@@ -292,3 +298,131 @@ def label_train_val_test_split(data, train_ratio=0.6, val_ratio=0.2, seed=42):
 
     return data, np.array([train_ratio, val_ratio, test_ratio])
 
+def read_split_indices(filename):
+    """
+    Reads a split_indices.txt file written by `write_split_indices` and returns
+    train, val, and test LH ID lists.
+
+    Args:
+        filename (str): Path to the split_indices.txt file
+
+    Returns:
+        tuple: (train_lhs, val_lhs, test_lhs) each is a list of LH string IDs
+    """
+    with open(filename, "r") as f:
+        lines = f.readlines()
+
+    train_lhs = ast.literal_eval(lines[1].strip())  # line after 'Train Indices'
+    val_lhs   = ast.literal_eval(lines[4].strip())  # line after 'Validation Indices'
+    test_lhs  = ast.literal_eval(lines[7].strip())  # line after 'Test Indices'
+
+    return train_lhs, val_lhs, test_lhs
+
+
+def check_dataset_integrity(dataset):
+    incomplete_indices = []
+
+    for i, data in enumerate(dataset):
+        missing_fields = []
+        if not hasattr(data, 'x') or data.x is None:
+            missing_fields.append('x')
+        if not hasattr(data, 'edge_index') or data.edge_index is None:
+            missing_fields.append('edge_index')
+        if not hasattr(data, 'y') or data.y is None:
+            missing_fields.append('y')
+
+        # Only check shape if fields are present
+        if not missing_fields:
+            try:
+                if data.edge_index.shape[1] != (data.x.shape[0] - 1):
+                    missing_fields.append('not a tree!')
+            except IndexError:
+                print(f"idx={i} has issue, verify...")
+                continue
+
+        if missing_fields:
+            incomplete_indices.append((i, missing_fields))
+
+    if incomplete_indices:
+        print(f"[WARNING] Found {len(incomplete_indices)} problematic Data objects:")
+        for idx, issues in incomplete_indices:
+            print(f"  - Index {idx}: missing or invalid -> {issues}")
+    else:
+        print("✅ All Data objects passed the integrity check.")
+
+    return incomplete_indices
+
+
+def find_ancestor_descendent_vn(infill_tree, red_node, mode='ancestor'):
+    ''' 
+    red_node: the virtual node
+    mode:
+    - "ancestor": return the two ancestor nodes
+    - "descendent": return the one descendent node
+    '''
+    child_nodes = infill_tree.edge_index[0]
+    parent_nodes = infill_tree.edge_index[1]
+    neighbors = child_nodes[parent_nodes == red_node]
+    if mode == "ancestor":
+        node_id = torch.topk(infill_tree.x[neighbors,-1], 2, largest=False)[1].tolist()
+    else: #return the next halo
+        node_id = torch.topk(infill_tree.x[neighbors,-1], 1, largest=True)[1].tolist()
+    return neighbors[node_id].tolist()
+
+
+def get_mass_c_vmax_scale_only(data):
+    data.x = data.x[:,:4]
+    return data
+
+def split_tree_dataset(all_trees, seed=42):
+    np.random.seed(seed)
+    all_ranks = len(all_trees)
+    values = np.random.permutation(all_ranks)
+    split_train = int(len(values) * 0.6)
+    split_val = int(len(values) * (0.8))
+    train_ranks = values[:split_train]
+    val_ranks = values[split_train:split_val]
+    test_ranks = values[split_val:]
+    train_trees = [all_trees[i] for i in train_ranks]
+    val_trees = [all_trees[i] for i in val_ranks]
+    test_trees = [all_trees[i] for i in test_ranks]
+    return train_trees, val_trees, test_trees
+
+def build_infill_dataset(dataset, same_lh=True, num_trees=10,
+                         path = "/mnt/home/thuang/ceph/playground/datasets/SAM_trees",
+                         infilling_file_name = "infilling_trees",
+                         infilling_ratios = "infilling_merger_ratios.pkl" ):
+    #data processing
+    dataset = [get_mass_c_vmax_scale_only(data) for data in dataset]
+    sizes = np.array([data.x.shape[0] for data in dataset])
+    idx_max = np.argmax(sizes)
+    kept_times = compute_kept_times(dataset[idx_max])
+    print(f"kept times = {len(kept_times)}")
+    if same_lh == False:
+        tree_ids = np.argsort(sizes)[-num_trees:]
+        #print(np.sort(sizes)[-num_trees:])
+    else:
+        tree_ids = range(num_trees)
+    all_trees = []
+    all_merger_ratios = []
+    for t, id in enumerate(tree_ids):
+        print(f"processing id={id}, {t+1}-th tree!")
+        data = dataset[id]
+        infill_tree = build_infill_tree(data, kept_times, verbose=False)
+        input_tree, ratio = label_train_val_test_split(infill_tree, seed=0)
+        all_trees.append(input_tree)
+        all_merger_ratios.append(ratio)
+    
+    train_trees, val_trees, test_trees = split_tree_dataset(all_trees)
+
+    torch.save(all_trees, f"{path}/{infilling_file_name}.pt")
+    torch.save(train_trees, f"{path}/{infilling_file_name}_train.pt")
+    torch.save(val_trees, f"{path}/{infilling_file_name}_val.pt")
+    torch.save(test_trees, f"{path}/{infilling_file_name}_test.pt")
+
+    #data statistics
+    pickle.dump(np.array(all_merger_ratios), open(f"{path}/{infilling_ratios}", "wb"))
+    pickle.dump(kept_times, open(f"{path}/kept_times_{infilling_file_name}.pkl", "wb"))
+    
+
+    return train_trees, val_trees, test_trees, all_trees, all_merger_ratios, kept_times
