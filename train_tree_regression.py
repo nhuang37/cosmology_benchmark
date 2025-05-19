@@ -12,9 +12,9 @@ import pickle
 import matplotlib.pyplot as plt
 import copy
 from utils.tree_util import read_split_indices, split_dataloader, dataset_to_dataloader
-from models.model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, \
+from models.tree_param.model_tree import TreeGINConv, TreeRegressor, MLPAgg, DeepSet, train_eval_model, \
     eval_and_plot, plot_train_val_loss, eval_model
-from models.model_velocity import count_parameters
+from models.cloud_velocity.model_velocity import count_parameters
 
 import argparse
 import pathlib

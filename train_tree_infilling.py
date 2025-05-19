@@ -13,13 +13,13 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
-from models.model_infilling import TreeNodeClassifier, train_eval_classifier, eval_classifier
+from models.tree_recon.model_infilling import TreeNodeClassifier, train_eval_classifier, eval_classifier
 from utils.tree_util import subset_data_features
 import math
 import pathlib
 import argparse
 import os
-from models.model_velocity import count_parameters
+from models.cloud_velocity.model_velocity import count_parameters
 import time
 import json
 

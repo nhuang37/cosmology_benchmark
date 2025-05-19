@@ -15,8 +15,8 @@ from torch_scatter import scatter_sum, scatter_mean
 import pickle
 import matplotlib.pyplot as plt
 import copy
-from models.model_velocity import VelocityGNN, VelocityHierarchicalGNN, count_parameters
-from models.simple_velocity import load_point_cloud_h5
+from models.cloud_velocity.model_velocity import VelocityGNN, VelocityHierarchicalGNN, count_parameters
+from models.cloud_velocity.simple_velocity import load_point_cloud_h5
 from utils.graph_util import build_graph, pbc_distance, coarsen_graph
 import h5py
 import os
