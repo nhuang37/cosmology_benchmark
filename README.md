@@ -1,12 +1,12 @@
 ## CosmoBench: A Multiscale, Multiview, Multitask Cosmology Benchmark for Geometric Deep Learning
 
 ### Task 1: Predicting Cosmological Parameters from Point Clouds
-- Data preparation: [See details in](./models/cloud_param/)
+- Data preparation: [See details in `models/cloud_param`](./models/cloud_param/)
 - Linear Least Squares (LLS): `python models/cloud_param/simple_param.py`
 - Graph Neural Networks (GNNs): See implementations in <https://github.com/Byeol-Haneul/TopoGal/tree/benchmark>
 
 ### Task 2: Predicting Velocities from Point Positions
-- Data preparation: [See details in](./models/cloud_velocity/)
+- Data preparation: [See details in `models/cloud_velocity`](./models/cloud_velocity/)
 - LLS: `python models/cloud_velocity/simple_velocity.py`
 - GNNs: `python train_velocity.py`
 
