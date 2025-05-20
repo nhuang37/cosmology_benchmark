@@ -240,8 +240,8 @@ if __name__ == '__main__':
                         #default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/invPwrFeat',
                          help='save path')
     #parser.add_argument('--num_clouds', default=3072, type=int, help="number of point clouds")
-    parser.add_argument('--K', default=10, type=int, help="number of x frequencies")
-    parser.add_argument('--P', default=4, type=int, help="number of powers of inv_dist")
+    parser.add_argument('--K', default=25, type=int, help="number of x frequencies")
+    parser.add_argument('--P', default=3, type=int, help="number of powers of inv_dist")
 
     parser.add_argument('--train_clouds', default=2048, type=int, help="number of training point clouds")
     parser.add_argument('--val_clouds', default=512, type=int, help="number of VAL point clouds")
@@ -259,18 +259,15 @@ if __name__ == '__main__':
     dir_train = f"{args.data_dir}/{args.h5_path_train}"
     filename = dir_train.split('/')[-1]             # Get the file name
     prefix = filename.split('_')[0]            # Extract 'CAMELS-SAM'
+    dir_test = f"{args.data_dir}/{args.h5_path_test}"
+    K = args.K
+    P = args.P
+    period_dict = {'Quijote': 1000, 'CAMELS-SAM': 100, 'CAMELS-TNG': 25, 'fiducial': 1000}
+    period = period_dict[prefix]
 
     if args.test_sample_idx is not None: #eval test sample idx = 0
-        dir_test = f"{args.data_dir}/{args.h5_path_test}"
-        K = args.K
-        P = args.P
         output_dir = f"{args.output_dir}/{prefix}/_K={K}_P={P}"
         w = torch.load(f"{output_dir}/weight.pt")
-
-        period_dict = {'Quijote': 1000, 'CAMELS-SAM': 100, 'CAMELS-TNG': 25, 'fiducial': 1000}
-
-        period = period_dict[prefix]
-        
         x,y,z,vx,vy,vz = load_point_cloud_h5(dir_test, args.test_sample_idx, args.data_name) 
         target = torch.stack([vx,vy,vz], dim=-1).cpu()
         Fx = compute_invPwrLaw_features(x,y,z,K,P, period) #(d, n)
@@ -289,6 +286,9 @@ if __name__ == '__main__':
     else:
         if args.search:
             best_R2, w, w_path, K, P, period = hyperparameter_search(args)
+        elif args.eval_test:
+            output_dir = f"{args.output_dir}/{prefix}/_K={K}_P={P}"
+            w = torch.load(f"{output_dir}/weight.pt")
         else:
             R2_val, w, w_path, K, P, period = run_training(args, args.K, args.P)
         

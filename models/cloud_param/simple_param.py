@@ -329,10 +329,9 @@ if __name__ == '__main__':
                         default='/mnt/home/thuang/ceph/playground/datasets/pos_param_lls', help='data feature dir')
 
     parser.add_argument('--output_dir', #default='/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5',
-                        default='/mnt/home/thuang/playground/param_prediction/LLS',
+                        default='/mnt/home/thuang/playground/param_prediction',
                         #default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/invPwrFeat',
                          help='save path')
-    
     parser.add_argument('--target_name', type=str, default='om', help='select target variable')
     parser.add_argument('--test_sample_idx', type=int, default=None, help='if specified, only test on \
                         test_sample test clouds, and save the predictions')
@@ -343,7 +342,6 @@ if __name__ == '__main__':
     dir_train = f"{args.data_dir}/{args.h5_path_train}"
     dir_val = f"{args.data_dir}/{args.h5_path_val}"
     dir_test = f"{args.data_dir}/{args.h5_path_test}"
-
     filename = dir_train.split('/')[-1]             # Get the file name
     prefix = filename.split('_')[0]            # Extract 'CAMELS-SAM'
 
@@ -364,7 +362,7 @@ if __name__ == '__main__':
     X_test = X_test.flatten(start_dim=0, end_dim=1) 
     X_test = X_test.to(device)  #shape (4*12, n_cloud_test)
  
-    #load labels - TODO: double check correct order
+    #load labels 
     Y_train = load_param_h5(dir_train, args.target_name, device=device)
     #Y_val = load_param_h5(dir_val, device=device) --used to select Rc
     Y_test = load_param_h5(dir_test, args.target_name, device=device)
@@ -391,7 +389,8 @@ if __name__ == '__main__':
         'R2_boot_std': R2_boot_std.item()
     }
     
-    results_path = f"{args.feature_dir}/lls_results.json"
+    result_dir = args.feature_dir if args.output_dir is None else args.output_dir
+    results_path = f"{result_dir}/lls_results.json" 
     if os.path.exists(results_path):
         with open(results_path, 'r') as f:
             existing_results = json.load(f)

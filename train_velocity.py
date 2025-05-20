@@ -338,7 +338,7 @@ def eval_pretrained_model(args):
         start_time = time.time()
         train_set = []
         for (start_idx, end_idx) in zip([0,5000,10000,15000],[5000,10000,15000,19651]):
-            file_path = f"{args.data_dir}/Quijote_Rc=0.1_graph_coarsen=False_train_start={start_idx}_end={end_idx}.pt"
+            file_path = f"{args.data_dir}/Quijote_Rc=0.1_train_start={start_idx}_end={end_idx}.pt"
             cur_set = torch.load(file_path)
             train_set = train_set + cur_set
         end_time = time.time()
@@ -431,21 +431,21 @@ def eval_pretrained_model(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, \
-                        default='/mnt/home/thuang/ceph/playground/datasets/point_clouds', help='data dir')
+                        default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/velocity_Quijote', help='data dir')
 
     parser.add_argument('--processed_train_path', type=str, \
-                        default='Quijote_Rc=0.1_graph_coarsen=False_train.pt', help='fine-grained train data path')
+                        default='Quijote_Rc=0.1_train.pt', help='fine-grained train data path')
     parser.add_argument('--processed_val_path', type=str, \
-                        default='Quijote_Rc=0.1_graph_coarsen=False_val.pt', help='fine-grained val data path')
+                        default='Quijote_Rc=0.1_val.pt', help='fine-grained val data path')
     parser.add_argument('--processed_test_path', type=str, \
-                        default='Quijote_Rc=0.1_graph_coarsen=False_test.pt', help='fine-grained test data path')
-    
+                        default='Quijote_Rc=0.1_test.pt', help='fine-grained test data path')
+    #optiona hierarhical MPNN -- not used for baseline
     parser.add_argument('--processed_coarsen_dataset_path', type=str, \
                         default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.4_graph_coarsen=True.pt', help='coarsen data path')
     parser.add_argument('--output_dir', type=pathlib.Path, \
                         default='/mnt/home/thuang/playground/velocity_prediction/GNN_search/Quijote_all', help='hyper-param search path')
     parser.add_argument('--HGNN_flag', action="store_true", help='if true: fit Hierarchical GNN')
-
+    
     parser.add_argument('--hid_dim', type=int, default=64, help='hidden dim')
     parser.add_argument('--n_layer', type=int, default=6, help='number of MP layers')
     parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
@@ -454,7 +454,7 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument('--search', action='store_true', help='Enable hyperparameter search')
     group.add_argument('--eval_test', action='store_true', help='Eval on test set only')
-    parser.add_argument('--train_all', action='store_true', help='train on the full set with 19k clouds')
+    parser.add_argument('--train_all', action='store_true', help='[ONLY USED FOR QUIJOTE] train on the full set with 19k clouds')
     parser.add_argument('--test_sample_idx_end', type=int, default=None, help='if specified, only test on \
                         test_sample test clouds, and save the predictions')
 
@@ -465,7 +465,10 @@ if __name__ == "__main__":
         for res in results:
             print(res)
     elif args.eval_test:
+        start_time = time.time()
         result_test = eval_pretrained_model(args)
+        end_time = time.time()
+        print(f"finish eval in {(start_time - end_time):.4f} secs!")
     else:
         save_dir = f"{args.output_dir}/hid={args.hid_dim}_layers={args.n_layer}_lr={args.lr:.4f}"      
         os.makedirs(save_dir, exist_ok=True)
