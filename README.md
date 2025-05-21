@@ -25,3 +25,4 @@
   - test set: `infilling_trees_25k_200_test.pt`
 - K-nearest neighbors: `tree_infilling.ipynb`
 - GNNs: `python train_tree_infilling.py`
+- EPS cosmological baseline: See implementations in <https://github.com/nhuang37/tree_recon_EPS>
