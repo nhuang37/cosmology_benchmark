@@ -2,7 +2,7 @@
 
 ### Data Exploration and Set-up
 - All data (including precomputed features and pretrain models) can be downloaded from <https://users.flatironinstitute.org/~fvillaescusa/CosmoBench>
-- A self-contained tutorial on data download, data exploration, and baseline training: `data_tutorial.ipynb`
+- A self-contained tutorial on data download, data exploration, and baseline training: [`data_tutorial.ipynb`](data_tutorial.ipynb)
 - Additional details can be found in <https://cosmobench.streamlit.app/>
 - To run all baselines:
   - set up an virtual enviroment
