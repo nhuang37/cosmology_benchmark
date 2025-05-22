@@ -16,7 +16,7 @@
 - Data preparation: See details in [`models/cloud_param`](./models/cloud_param/)
 - Cosmological baseline (2PCF): `python models/cloud_param/2PCF.py`
 - Linear Least Squares (LLS): `python models/cloud_param/simple_param.py`
-- Graph Neural Networks (GNNs): See implementations in <https://github.com/Byeol-Haneul/TopoGal/tree/benchmark>
+- Graph Neural Networks (GNNs): See implementations in <https://github.com/Byeol-Haneul/CosmoTopo/tree/benchmark>
 
 ### Task 2: Predicting Velocities from Point Positions
 - Data preparation: See details in [`models/cloud_velocity`](./models/cloud_velocity/)
