@@ -122,7 +122,7 @@ def find_leaf_nodes(data: Data):
 
     return leaf_nodes
 
-def prune_linear_nodes(data: Data, use_threshold=False, threshold = math.log10(3e10)) -> Data:
+def prune_linear_nodes(data: Data, use_threshold=True, threshold = math.log10(3e10)) -> Data:
     edge_index = data.edge_index
     num_nodes = data.x.shape[0]
 
@@ -266,7 +266,8 @@ def dataset_to_dataloader(dataset_train, dataset_val, dataset_test=None,
     if feat_idx is not None:
         dataset_train = subset_data_features(dataset_train, feat_idx)
         dataset_val = subset_data_features(dataset_val, feat_idx)
-        dataset_test = subset_data_features(dataset_test, feat_idx)
+        if dataset_test is not None:
+            dataset_test = subset_data_features(dataset_test, feat_idx)
 
     if normalize:
         print(f"normalizing for mean 0 , std 1 across all trees!")
