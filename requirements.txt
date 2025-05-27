@@ -1,5 +1,4 @@
 asposestorage==1.0.2
-Corrfunc==2.5.3
 h5py==3.13.0
 matplotlib==3.10.3
 networkx==3.4.2
@@ -15,5 +14,6 @@ torch_geometric==2.6.1
 tqdm==4.67.1
 ytree==3.2.1
 ipykernel==6.29.5
+#Corrfunc==2.5.3 ##use this if you want to run models.cloud_param.2PCF
 
 --find-links https://pytorch-geometric.com/whl/torch-2.5.1+cu124.html
