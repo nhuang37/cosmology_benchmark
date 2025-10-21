@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 import copy
 from models.cloud_velocity.model_velocity import VelocityGNN, VelocityHierarchicalGNN, count_parameters
 from models.cloud_velocity.simple_velocity import load_point_cloud_h5
-from utils.graph_util import build_graph, pbc_distance, coarsen_graph
+#from utils.graph_util import build_graph, pbc_distance, coarsen_graph
 import h5py
 import os
 import argparse
@@ -69,6 +69,24 @@ def eval_model(model, val_loader, device, return_pred=False):
     else:
         return mse_all, R2_all, None, None
 
+def eval_model_per_axis_R2(model, val_loader, device):
+    model.eval()
+    R2_all, R2x_all, R2y_all, R2z_all = [], [], [], []
+    with torch.no_grad():
+        for data in val_loader:
+            data = data.to(device)
+            pred = model(data)
+            _, R2 = compute_mse_R2(pred, data.y)
+            _, R2x = compute_mse_R2(pred[:,0], data.y[:,0])
+            _, R2y = compute_mse_R2(pred[:,1], data.y[:,1])
+            _, R2z = compute_mse_R2(pred[:,2], data.y[:,2])
+            R2_all.append(R2.item())
+            R2x_all.append(R2x.item())
+            R2y_all.append(R2y.item())
+            R2z_all.append(R2z.item())
+    R2, R2x, R2y, R2z = [sum(v)/len(v) for v in (R2_all, R2x_all, R2y_all, R2z_all)]
+    return R2, R2x, R2y, R2z
+    
 
 def train_hierarchical_model(model, pair_train_loader, optimizer, criterion, device, alpha=0.5):
     ep_loss, ep_loss_coarse = 0, 0
@@ -134,6 +152,10 @@ def train_eval_node_regressor(model, train_loader, val_loader, save_dir=None,
             R2_best = R2
         if epoch % 10 == 0:
             print(f'Epoch {epoch}, Train Loss: {train_loss[-1]:.4f}; Val Loss: {val_loss[-1]:.4f}; R2: {R2:.4f}, train_1ep_time={(end_time - start_time):.4f}')
+        results = {'train_loss': train_loss, 
+                   'val_loss': val_loss,
+                   'R2_val_best': R2_best}
+        pickle.dump(results, open(f"{save_dir}/results.pkl", 'wb'))
     return train_loss, val_loss, R2_best
 
 def train_eval_node_regressor_hierarchical(model, train_loader, val_loader, save_dir=None, 
@@ -227,7 +249,7 @@ def run_training(train_path, val_path, train_all,
         start_time = time.time()
         train_set = []
         for (start_idx, end_idx) in zip([0,5000,10000,15000],[5000,10000,15000,19651]):
-            file_path = f"{args.data_dir}/Quijote_Rc=0.1_graph_coarsen=False_train_start={start_idx}_end={end_idx}.pt"
+            file_path = f"{args.data_dir}/Quijote_Rc=0.1_train_start={start_idx}_end={end_idx}.pt"
             cur_set = torch.load(file_path)
             train_set = train_set + cur_set
         end_time = time.time()
@@ -240,6 +262,8 @@ def run_training(train_path, val_path, train_all,
         coarse_val_set = torch.load(coarse_val_path)
 
     X_mean, X_std, V_mean, V_std = compute_X_V_mean_std(train_set)
+    torch.save([X_mean, X_std, V_mean, V_std], f"{args.output_dir}/XV_mean_std.pt")
+    print(f"saved training set mean / std !")
     train_set = [standardize_data(data, X_mean, X_std, V_mean, V_std) for data in train_set]
     val_set = [standardize_data(data, X_mean, X_std, V_mean, V_std) for data in val_set]
     print(len(train_set), len(val_set))
@@ -268,6 +292,14 @@ def run_training(train_path, val_path, train_all,
         _, _, R2_best = train_eval_node_regressor(model, train_loader, val_loader, 
                                                  num_epochs=args.num_epochs, lr=lr,
                                                  device=device, save_dir=save_dir)
+    # === Save best config ===
+    best_config = {'n_layer': n_layer, 'd_hidden': hid_dim, 'lr': lr,
+                        'val_R2': R2_best, 'save_dir': f"{save_dir}/model.pt"}
+    best_config_path = os.path.join(save_dir, "best_config.json")
+    with open(best_config_path, 'w') as f:
+        json.dump(best_config, f, indent=4)
+    print(f"Best config saved to: {best_config_path}")
+    
     return R2_best
 
 
@@ -303,9 +335,6 @@ def hyperparameter_search(args):
     print(f"\nBest validation R²: {best_R2:.4f}")
     # === Save all search results ===
     results_path = os.path.join("/mnt/home/thuang/playground/velocity_prediction/GNN_search", "hyperparameter_search_results.json")
-    # with open(results_path, 'w') as f:
-    #     json.dump(results, f, indent=4)
-    # print(f"Search results saved to: {results_path}")
 
     # Load existing results if file exists
     if os.path.exists(results_path):
@@ -331,28 +360,41 @@ def hyperparameter_search(args):
 
     return best_config, results
 
+def load_cosmo_h(h5_path):
+    with h5py.File(h5_path, 'r') as f:
+        grp = f[f"params"]
+        cosmo_h = grp["h"][:]
+    return cosmo_h
+
 def eval_pretrained_model(args):
     ##load data
     train_path = f"{args.data_dir}/{args.processed_train_path}"
-    if args.train_all:
-        start_time = time.time()
-        train_set = []
-        for (start_idx, end_idx) in zip([0,5000,10000,15000],[5000,10000,15000,19651]):
-            file_path = f"{args.data_dir}/Quijote_Rc=0.1_train_start={start_idx}_end={end_idx}.pt"
-            cur_set = torch.load(file_path)
-            train_set = train_set + cur_set
-        end_time = time.time()
-        print(f"loaded {len(train_set)} training clouds, used {(end_time - start_time):.4f} secs!")
-    else:
-        train_path = f"{args.data_dir}/{args.processed_train_path}"
-        train_set = torch.load(train_path)
-
     test_path =  f"{args.data_dir}/{args.processed_test_path}"
     test_set = torch.load(test_path) 
-    
-    X_mean, X_std, V_mean, V_std = compute_X_V_mean_std(train_set)
-    torch.save([X_mean, X_std, V_mean, V_std], f"{args.output_dir}/XV_mean_std.pt")
-    print(f"saved training set mean / std !")
+    mean_std_path = f"{args.output_dir}/XV_mean_std.pt"
+    if os.path.exists(mean_std_path):
+        print("loading...")
+        X_mean, X_std, V_mean, V_std = torch.load(mean_std_path)
+        print(f"loaded precomputed mean std, X_mean = {X_mean}")
+    else:
+        print("compute mean std from scratch...")
+        if args.train_all:
+            start_time = time.time()
+            train_set = []
+            for (start_idx, end_idx) in zip([0,5000,10000,15000],[5000,10000,15000,19651]):
+                file_path = f"{args.data_dir}/Quijote_Rc=0.1_train_start={start_idx}_end={end_idx}.pt"
+                cur_set = torch.load(file_path)
+                train_set = train_set + cur_set
+            end_time = time.time()
+            print(f"loaded {len(train_set)} training clouds, used {(end_time - start_time):.4f} secs!")
+        else:
+            train_path = f"{args.data_dir}/{args.processed_train_path}"
+            train_set = torch.load(train_path)
+        
+        X_mean, X_std, V_mean, V_std = compute_X_V_mean_std(train_set)
+        torch.save([X_mean, X_std, V_mean, V_std], f"{args.output_dir}/XV_mean_std.pt")
+        print(f"saved training set mean / std !")
+
     if args.test_sample_idx_end is not None: #save the test set prediction on the first cloud
         test_set = [standardize_data(data, X_mean, X_std, V_mean, V_std) for i, data in enumerate(test_set) if i < args.test_sample_idx_end] #TODO: trick by using train_set for plotting purpose
         return_pred = True    
@@ -374,7 +416,7 @@ def eval_pretrained_model(args):
 
     ##load model
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    with open(os.path.join(args.output_dir, "best_config.json"), 'r') as f:
+    with open(os.path.join(args.save_dir, "best_config.json"), 'r') as f:
         best_config = json.load(f)
     if args.HGNN_flag:
         model = VelocityHierarchicalGNN(
@@ -397,18 +439,22 @@ def eval_pretrained_model(args):
 
     ##Run eval
     print(f"Evaluating best model with size = {count_parameters(model)} on test set...")
-    if args.HGNN_flag:
-        _, R2_all, _, _ = eval_hierarchical_model(model, test_loader, device)
+    if args.eval_per_axis:
+        R2_test, R2x, R2y, R2z = eval_model_per_axis_R2(model, test_loader, device)
     else:
-        _, R2_all, pred, target = eval_model(model, test_loader, device, return_pred=return_pred)
-    
-    R2_test = sum(R2_all) / len(R2_all)
-    print(f"Best Model Test R²: {R2_test:.4f}")
+        if args.HGNN_flag:
+            _, R2_all, _, _ = eval_hierarchical_model(model, test_loader, device)
+        else:
+            _, R2_all, pred, target = eval_model(model, test_loader, device, return_pred=return_pred)
+        
+        R2_test = sum(R2_all) / len(R2_all)
+        print(f"Best Model Test R²: {R2_test:.4f}")
 
     if return_pred:
         prefix = args.processed_train_path.split('_')[0]  
         test_pred_path = os.path.join(args.output_dir, f"{prefix}_test_pred_{args.test_sample_idx_end}.pt")
-        torch.save([pred, target, X_mean, X_std, V_mean, V_std], test_pred_path)
+        sims = [data.sim_ID for data in test_set]
+        torch.save([pred, target, X_mean, X_std, V_mean, V_std, sims], test_pred_path)
         print(f"Saved test velocity predictions to: {test_pred_path}")
     else:
         ## Save to file
@@ -420,12 +466,15 @@ def eval_pretrained_model(args):
             'test_R2': R2_test,
             'save_dir': best_config['save_dir']
         }
+        if args.eval_per_axis:
+            results_dict['test_R2x'] = R2x
+            results_dict['test_R2y'] = R2y
+            results_dict['test_R2z'] = R2z
 
         test_result_path = os.path.join(args.output_dir, "test_R2_result.json")
         with open(test_result_path, 'w') as f:
             json.dump(results_dict, f, indent=4)
         print(f"Saved test evaluation results to: {test_result_path}")
-
 
 
 if __name__ == "__main__":
@@ -434,11 +483,11 @@ if __name__ == "__main__":
                         default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/velocity_Quijote', help='data dir')
 
     parser.add_argument('--processed_train_path', type=str, \
-                        default='Quijote_Rc=0.1_train.pt', help='fine-grained train data path')
+                        default='Quijote_RC=0.1_train_subset.pt', help='fine-grained train data path')
     parser.add_argument('--processed_val_path', type=str, \
-                        default='Quijote_Rc=0.1_val.pt', help='fine-grained val data path')
+                        default='Quijote_Rc=0.1_val_start=0_end=6551.pt', help='fine-grained val data path')
     parser.add_argument('--processed_test_path', type=str, \
-                        default='Quijote_Rc=0.1_test.pt', help='fine-grained test data path')
+                        default='Quijote_Rc=0.1_test_start=0_end=6550.pt', help='fine-grained test data path')
     #optiona hierarhical MPNN -- not used for baseline
     parser.add_argument('--processed_coarsen_dataset_path', type=str, \
                         default='/mnt/home/thuang/ceph/playground/datasets/point_clouds/Rc=0.4_graph_coarsen=True.pt', help='coarsen data path')
@@ -457,18 +506,24 @@ if __name__ == "__main__":
     parser.add_argument('--train_all', action='store_true', help='[ONLY USED FOR QUIJOTE] train on the full set with 19k clouds')
     parser.add_argument('--test_sample_idx_end', type=int, default=None, help='if specified, only test on \
                         test_sample test clouds, and save the predictions')
+    parser.add_argument('--eval_per_axis', action='store_true', help='eval per-axis R2')
 
     args = parser.parse_args()
+    args.redshift_flag = True if args.data_dir.split('_')[-1] == "redshift" else False
     print(args)
+    if args.redshift_flag:
+        assert "redshift" in str(args.output_dir).split('/')[-2], "must interact with the redshift output dir!"
+
     if args.search:
         best_config, results = hyperparameter_search(args)
         for res in results:
             print(res)
-    elif args.eval_test:
+    elif args.eval_test: #eval only
         start_time = time.time()
+        args.save_dir = args.output_dir
         result_test = eval_pretrained_model(args)
         end_time = time.time()
-        print(f"finish eval in {(start_time - end_time):.4f} secs!")
+        print(f"finish eval in {(end_time - start_time):.4f} secs!")
     else:
         save_dir = f"{args.output_dir}/hid={args.hid_dim}_layers={args.n_layer}_lr={args.lr:.4f}"      
         os.makedirs(save_dir, exist_ok=True)
@@ -480,3 +535,6 @@ if __name__ == "__main__":
         torch.cuda.synchronize()  # Make sure all training GPU ops are done
         end_time = time.time()
         print(f"R2_val = {R2_best:.4f}, training time = {(end_time - start_time):.4f}")
+        args.save_dir = save_dir 
+        result_test = eval_pretrained_model(args)
+

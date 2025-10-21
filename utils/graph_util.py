@@ -9,7 +9,7 @@ import random
 from torch_geometric.data import Data, DataLoader, InMemoryDataset, Dataset
 from torch_geometric.utils import scatter, degree
 from torch_geometric.nn.pool import voxel_grid, avg_pool_x, avg_pool
-
+from .get_redshift_pos import pos_redshift_space
 import h5py
 import time
 
@@ -109,10 +109,10 @@ def split_dataloader(dataset, batch_size=2000, shuffle=True):
     return train_loader, valid_loader, test_loader
 
 
-def mapH5_to_PyGData(g, labels=None, 
+def mapH5_to_PyGData(g, labels=None, key=None,
                      edge_flag=True, prefix='Quijote', predict_velocity=True, 
-                     r_ratio=0.4, leafsize=16, epsilon=0.00001,
-                     coarsen=True, g_name=None):
+                     r_ratio=0.1, leafsize=16, epsilon=0.00001,
+                     coarsen=True, g_name=None, redshift=False, redshift_x=False):
     '''
     input: g: dataset in the H5 file, storing point clouds 
     return PyG.Data'''
@@ -121,17 +121,23 @@ def mapH5_to_PyGData(g, labels=None,
     r_link = r_ratio*L
 
     # Extract input node features
-    #Mvir = torch.tensor(g['Mvir'][:], dtype=torch.float).view(-1, 1)
-    #concentration = torch.tensor(g['c_klypin'][:], dtype=torch.float).view(-1,1)
-    pos = np.stack( [g['X'][:], g['Y'][:], g['Z'][:]], axis=-1).astype(np.float64)
+    if redshift: #redshift position on z-axis:
+        x, y = g['X'][:], g['Y'][:]
+        z = pos_redshift_space(g['Z'][:],  g['VZ'][:], L) #, param_h)
+    elif redshift_x:  #redshift position on x-axis for DEBUGGIN
+        x = pos_redshift_space(g['X'][:],  g['VX'][:], L) #, param_h)
+        y, z = g['Y'][:], g['Z'][:]
+    else:
+        x, y, z = g['X'][:], g['Y'][:], g['Z'][:]
+    pos = np.stack( [x, y, z], axis=-1).astype(np.float64)
 
     # Construct labels
     if predict_velocity: #point-wise labels
         y = np.stack( [g['VX'][:], g['VY'][:], g['VZ'][:]], axis=-1).astype(np.float64)
     else:
     # Read the cloud-level labels: cosmological parameters:
-        Omega_m = np.array(labels['Omega_m'][:]).reshape(-1,1)
-        sigma_8 = np.array(labels['sigma_8'][:]).reshape(-1,1)
+        Omega_m = np.array(labels['Omega_m'][key]).reshape(-1,1)
+        sigma_8 = np.array(labels['sigma_8'][key]).reshape(-1,1)
         y = np.hstack((Omega_m, sigma_8)).astype(np.float64)
     #build coarsen graphs
     if coarsen: #TODO: save the inverse and use it as additional feats
@@ -159,13 +165,15 @@ def mapH5_to_PyGData(g, labels=None,
                 y=torch.DoubleTensor(y), 
                 edge_index=torch.tensor(edge_index.T, dtype=torch.long),
                 edge_attr=torch.DoubleTensor(edge_dist),
-                cluster_idx=cluster_idx)
+                cluster_idx=cluster_idx,
+                sim_ID = key)
     return data
 
 
 def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
                          predict_velocity=True, data_name='BSQ', prefix='Quijote', subset_ids=None,
-                         r_ratio=0.4, leafsize=16, epsilon=0.00001, coarsen=True, mode='train'):
+                         r_ratio=0.4, leafsize=16, epsilon=0.00001, coarsen=True, mode='train', 
+                         redshift=False, redshift_x=False):
     ''' 
     Load the h5 file where groups (i.e. point clouds) contain (halo) point features (e.g., position, mass), 
     if predict_velocity == False:
@@ -183,9 +191,10 @@ def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
             for key in subset_ids:
                 graph_name = f"{data_name}_{key}"
                 g = group[graph_name]
-                data = mapH5_to_PyGData(g, labels, r_ratio=r_ratio, 
+                data = mapH5_to_PyGData(g, labels, key, r_ratio=r_ratio, 
                      edge_flag=edge_flag, prefix=prefix, predict_velocity=predict_velocity, 
-                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen, g_name=graph_name)
+                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen, g_name=graph_name, 
+                     redshift=redshift, redshift_x=redshift_x)
                 data_list.append(data)
                 count += 1
                 # time
@@ -197,9 +206,11 @@ def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
         else:
             for graph_name in group:
                 g = group[graph_name] #of the form '/BSQ/BSQ_0'
-                data = mapH5_to_PyGData(g, labels, r_ratio=r_ratio, 
+                key = graph_name.split('_')[-1]
+                data = mapH5_to_PyGData(g, labels, key, r_ratio=r_ratio, 
                      edge_flag=edge_flag, prefix=prefix, predict_velocity=predict_velocity, 
-                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen, g_name=graph_name)
+                     leafsize=leafsize, epsilon=epsilon, coarsen=coarsen, g_name=graph_name,
+                     redshift=redshift, redshift_x=redshift_x)
                 data_list.append(data)
                 count += 1
                 # time
@@ -214,7 +225,8 @@ def build_PyGdata_fromH5(h5_path, output_dir, edge_flag=True,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--h5_path', #default='/mnt/home/rstiskalek/ceph/CAMELS-SAM/LH_rockstar_99.hdf5',
+    parser.add_argument('--h5_path', #default='/mnt/home/rstiskalek/ceph/graps4science/CAMELS-SAM_LH_gal_99_top5000.hdf5', 
+                        #default='/mnt/home/rstiskalek/ceph/graps4science/CAMELS-TNG_galaxy_90_ALL.hdf5'
                         default='/mnt/home/rstiskalek/ceph/graps4science/Quijote_BSQ_rockstar_10_top5000.hdf5',
                          help='h5 path to load the data')
     parser.add_argument('--data_name', default='BSQ', type=str,
@@ -229,6 +241,8 @@ if __name__ == '__main__':
     parser.add_argument('--end_idx', default=2048, type=int,help='ending point cloud idx')
     parser.add_argument('--mode', default="train", type=str,help='split')
     parser.add_argument('--presplit_flag', action="store_true", help='if true: preprocess the splitted h5 files')
+    parser.add_argument('--redshift_flag', action="store_true", help='if true: map z to z_redshift')
+    parser.add_argument('--redshiftx_flag', action="store_true", help='if true: map x to x_redshift; debugging purpose')
 
     #the same script applies to position_only and position_velocity point clouds, 
     # as we only use position features to construct the graph
@@ -253,9 +267,11 @@ if __name__ == '__main__':
                                         prefix=prefix, 
                                         r_ratio=args.r_ratio, 
                                         coarsen=args.coarsen_flag,
-                                        mode=mode)
+                                        mode=mode,
+                                        redshift=args.redshift_flag,
+                                        redshift_x=args.redshiftx_flag)
             
-            output_file = f'{args.output_dir}/{prefix}_Rc={args.r_ratio}_graph_coarsen={args.coarsen_flag}_{mode}.pt'
+            output_file = f'{args.output_dir}/{prefix}_Rc={args.r_ratio}_{mode}.pt'
             torch.save(data_list, output_file)
 
     else:
@@ -267,7 +283,10 @@ if __name__ == '__main__':
                                     subset_ids=subset_ids,
                                     r_ratio=args.r_ratio, 
                                     coarsen=args.coarsen_flag,
-                                    mode=args.mode)
-        output_file = f'{args.output_dir}/{prefix}_Rc={args.r_ratio}_graph_coarsen={args.coarsen_flag}_{args.mode}_start={args.start_idx}_end={args.end_idx}.pt'
+                                    mode=args.mode,
+                                    redshift=args.redshift_flag,
+                                    redshift_x=args.redshiftx_flag)
+        output_file = f'{args.output_dir}/{prefix}_Rc={args.r_ratio}_{args.mode}_start={args.start_idx}_end={args.end_idx}.pt'
         torch.save(data_list, output_file)
         
+#python utils/graph_util.py --h5_path '/mnt/home/rstiskalek/ceph/graps4science/CAMELS-SAM_LH_gal_99.hdf5' --output_dir '/mnt/home/thuang/ceph/playground/datasets/point_clouds/velocity_CAMELS-SAM_redshift' --presplit_flag --redshift_flag
