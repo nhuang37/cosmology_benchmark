@@ -7,4 +7,4 @@
     - Default set-up: `CAMELS-SAM`
 
 
-- Graph Neural Networks (GNNs): See implementations in <https://github.com/Byeol-Haneul/TopoGal/tree/benchmark>
+- Graph Neural Networks (GNNs): See implementations in <https://github.com/Byeol-Haneul/CosmoTopo/tree/benchmark>
